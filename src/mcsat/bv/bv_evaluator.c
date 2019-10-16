@@ -23,12 +23,6 @@
 
 #include <assert.h>
 
-static
-void bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level);
-
-static
-bool bv_evaluator_run_atom(bv_evaluator_t* eval, term_t t, uint32_t* eval_level);
-
 void bv_evaluator_construct(bv_evaluator_t* evaluator, const plugin_context_t* ctx) {
   evaluator->ctx = ctx;
 
@@ -128,13 +122,19 @@ void bv_evaluator_set_term_cache(bv_evaluator_t* evaluator, term_t t, bvconstant
 // Forward declarations
 
 static
-void bv_evaluator_run_composite_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level);
+bool bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level);
 
 static
-void bv_evaluator_run_bv_array(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level);
+bool bv_evaluator_run_atom(bv_evaluator_t* eval, term_t t, bool* out_value, uint32_t* eval_level);
 
 static
-void bv_evaluator_run_bv_array(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level) {
+bool bv_evaluator_run_composite_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level);
+
+static
+bool bv_evaluator_run_bv_array(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level);
+
+static
+bool bv_evaluator_run_bv_array(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level) {
 
   term_table_t* terms = eval->ctx->terms;
 
@@ -144,7 +144,8 @@ void bv_evaluator_run_bv_array(bv_evaluator_t* eval, term_t t, bvconstant_t* out
   uint32_t t_bitsize = term_bitsize(terms, t);
   composite_term_t* t_composite = composite_term_desc(eval->ctx->terms, t);
   uint32_t t_arity = t_composite->arity;
-
+  assert(t_bitsize == t_composite->arity);
+  
   if (ctx_trace_enabled(eval->ctx, "mcsat::bv::eval")) {
     ctx_trace_printf(eval->ctx, "Evaluating: ");
     ctx_trace_term(eval->ctx, t);
@@ -155,14 +156,29 @@ void bv_evaluator_run_bv_array(bv_evaluator_t* eval, term_t t, bvconstant_t* out
   bvconstant_set_bitsize(out_value, t_bitsize);
 
   // Evaluate all arguments
-  for (uint32_t i = 0; i < t_arity; i++) {
+  uint32_t i = 0;
+  for (; i < t_arity; i++) {
     term_t t_i = t_composite->arg[i];
     term_t t_i_pos = unsigned_term(t_i); // Could be Boolean terms, so we negate if needed
     uint32_t eval_level_i = 0;
-    bool b_i = bv_evaluator_run_atom(eval, t_i_pos, &eval_level_i);
+    bool b_i;
+    if (!bv_evaluator_run_atom(eval, t_i_pos, &b_i, &eval_level_i))
+      break;
     if (t_i_pos != t_i) { b_i = !b_i; }
     bvconst_assign_bit(out_value->data, i, b_i);
     if (eval_level_i > *eval_level) { *eval_level = eval_level_i; }
+  }
+
+  if (i == 0) {
+    delete_bvconstant(out_value);
+    return false;
+  }
+  
+  if (i < t_arity){
+    uint32_t *data = out_value->data;
+    init_bvconstant(out_value); // Removes the pointer to the above
+    bvconstant_copy(out_value, i, data);
+    safe_free(data);
   }
 
   if (ctx_trace_enabled(eval->ctx, "mcsat::bv::eval")) {
@@ -172,10 +188,12 @@ void bv_evaluator_run_bv_array(bv_evaluator_t* eval, term_t t, bvconstant_t* out
     bvconst_print(ctx_trace_out(eval->ctx), out_value->data, out_value->bitsize);
     ctx_trace_printf(eval->ctx, "\n");
   }
+
+  return true;
 }
 
 static
-void bv_evaluator_run_composite_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level) {
+bool bv_evaluator_run_composite_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level) {
 
   term_table_t* terms = eval->ctx->terms;
   assert(is_bitvector_term(terms, t));
@@ -198,7 +216,13 @@ void bv_evaluator_run_composite_term(bv_evaluator_t* eval, term_t t, bvconstant_
     term_t t_i_pos = unsigned_term(t_i); // Could be Boolean terms, so we negate if needed
     uint32_t eval_level_i = 0;
 
-    bv_evaluator_run_term(eval, t_i_pos, t_arg_val + i, &eval_level_i);
+    if (!bv_evaluator_run_term(eval, t_i_pos, t_arg_val + i, &eval_level_i)){
+      for(uint32_t j = 0; j < i; j++) { // all bv_constants initialized so far need to be deleted
+        delete_bvconstant(t_arg_val + j);
+      }
+      return false;
+    }
+    assert( t_bitsize == t_arg_val[i].bitsize );
     if (t_i_pos != t_i) {
       bvconst_complement(t_arg_val[i].data, t_arg_val[i].width);
     }
@@ -207,7 +231,7 @@ void bv_evaluator_run_composite_term(bv_evaluator_t* eval, term_t t, bvconstant_
     }
   }
 
-  // Initialize output
+  // Initialize output (now we know we're succeeding)
   init_bvconstant(out_value);
   bvconstant_set_bitsize(out_value, t_bitsize);
 
@@ -236,12 +260,12 @@ void bv_evaluator_run_composite_term(bv_evaluator_t* eval, term_t t, bvconstant_
   case BV_ASHR:
     bvconst_ashr(out_value->data, t_arg_val[0].data, t_arg_val[1].data, t_arg_val[0].bitsize);
     break;
-  case BV_ARRAY:
-    for (uint32_t i = 0; i < t_arity; ++ i) {
-      bool bit_i = bvconst_tst_bit(t_arg_val[i].data, 0);
-      bvconst_assign_bit(out_value->data, i, bit_i);
-    }
-    break;
+  /* case BV_ARRAY: */
+  /*   for (uint32_t i = 0; i < t_arity; ++ i) { */
+  /*     bool bit_i = bvconst_tst_bit(t_arg_val[i].data, 0); */
+  /*     bvconst_assign_bit(out_value->data, i, bit_i); */
+  /*   } */
+  /*   break; */
   default:
     // Not a composite
     assert(false);
@@ -263,13 +287,15 @@ void bv_evaluator_run_composite_term(bv_evaluator_t* eval, term_t t, bvconstant_
     bvconst_print(ctx_trace_out(eval->ctx), out_value->data, out_value->bitsize);
     ctx_trace_printf(eval->ctx, "\n");
   }
+
+  return true;
 }
 
 /**
  * Evaluate term and construct the value into out. User should destruct.
  */
 static
-void bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level) {
+bool bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_value, uint32_t* eval_level) {
 
   if (ctx_trace_enabled(eval->ctx, "mcsat::bv::eval")) {
     ctx_trace_printf(eval->ctx, "Evaluating: ");
@@ -280,7 +306,7 @@ void bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_val
 
   // Check if cached
   if (bv_evaluator_get_term_cache(eval, t, out_value, eval_level)) {
-    return;
+    return true;
   }
 
   term_table_t* terms = eval->ctx->terms;
@@ -328,46 +354,62 @@ void bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_val
     bv_evaluator_run_composite_term(eval, t, out_value, eval_level);
     break;
   case BIT_TERM: {
-    select_term_t* desc = bit_term_desc(terms, t);
-    term_t select_arg = desc->arg;
-    uint32_t select_idx = desc->idx;
-    bvconstant_t select_arg_value;
-    bv_evaluator_run_term(eval, select_arg, &select_arg_value, eval_level);
-    init_bvconstant(out_value);
-    bool select_value = bvconst_tst_bit(select_arg_value.data, select_idx);
-    if (select_value) {
-      bvconstant_set_all_one(out_value, 1);
-    } else {
-      bvconstant_set_all_zero(out_value, 1);
-    }
-    delete_bvconstant(&select_arg_value);
-    break;
+    assert(false);
+    /* select_term_t* desc = bit_term_desc(terms, t); */
+    /* term_t select_arg = desc->arg; */
+    /* uint32_t select_idx = desc->idx; */
+    /* bvconstant_t select_arg_value; */
+    /* if (!bv_evaluator_run_term(eval, select_arg, &select_arg_value, eval_level)) { */
+    /*   return false; */
+    /* } */
+    /* if (select_idx >= select_arg_value.bitsize){ */
+    /*   delete_bvconstant(&select_arg_value); */
+    /*   return(false); */
+    /* } */
+    /* init_bvconstant(out_value); */
+    /* bool select_value = bvconst_tst_bit(select_arg_value.data, select_idx); */
+    /* if (select_value) { */
+    /*   bvconstant_set_all_one(out_value, 1); */
+    /* } else { */
+    /*   bvconstant_set_all_zero(out_value, 1); */
+    /* } */
+    /* delete_bvconstant(&select_arg_value); */
+    /* break; */
   }
   case BV_POLY: {
     bvpoly_t* p = bvpoly_term_desc(terms, t);
-    init_bvconstant(out_value);
-    bvconstant_set_all_zero(out_value, p->bitsize);
+    uint32_t bitsize = p->bitsize;
+    bvconstant_t tmp;
+    bvconstant_set_all_zero(&tmp, bitsize);
     *eval_level = 0;
     for (uint32_t p_i = 0; p_i < p->nterms; ++ p_i) {
       if (p->mono[p_i].var == const_idx) {
-        bvconst_add(out_value->data, out_value->width, p->mono[p_i].coeff);
+        bvconst_add(tmp.data, tmp.width, p->mono[p_i].coeff);
         continue;
       } else {
         term_t t_i = p->mono[p_i].var;
         bvconstant_t t_i_value;
         uint32_t eval_level_i = 0;
-        bv_evaluator_run_term(eval, t_i, &t_i_value, &eval_level_i);
+        if (!bv_evaluator_run_term(eval, t_i, &t_i_value, &eval_level_i)) {
+          delete_bvconstant(&tmp);
+          return false;
+        }
+        if (t_i_value.bitsize < bitsize) { bitsize = t_i_value.bitsize; }
         if (eval_level_i > *eval_level) { *eval_level = eval_level_i; }
-        bvconst_addmul(out_value->data, out_value->width, p->mono[p_i].coeff, t_i_value.data);
+        bvconst_addmul(tmp.data, t_i_value.width, p->mono[p_i].coeff, t_i_value.data);
         delete_bvconstant(&t_i_value);
       }
     }
-    bvconstant_normalize(out_value);
+    bvconstant_normalize(&tmp);
+    init_bvconstant(out_value);
+    bvconstant_copy(out_value, bitsize, tmp.data);
+    delete_bvconstant(&tmp);
     break;
   }
   case BV64_POLY: {
     uint64_t sum = 0;
     bvpoly64_t* p = bvpoly64_term_desc(terms, t);
+    uint32_t bitsize = p->bitsize;
     *eval_level = 0;
     for (uint32_t p_i = 0; p_i < p->nterms; p_i++) {
       if (p->mono[p_i].var == const_idx) {
@@ -376,9 +418,12 @@ void bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_val
         term_t t_i = p->mono[p_i].var;
         bvconstant_t t_i_value;
         uint32_t eval_level_i = 0;
-        bv_evaluator_run_term(eval, t_i, &t_i_value, &eval_level_i);
-        if (eval_level_i > *eval_level) { *eval_level = eval_level_i; }
+        if (!bv_evaluator_run_term(eval, t_i, &t_i_value, &eval_level_i)) {
+          return false;
+        }
         assert(t_i_value.bitsize <= 64);
+        if (t_i_value.bitsize < bitsize) { bitsize = t_i_value.bitsize; }
+        if (eval_level_i > *eval_level) { *eval_level = eval_level_i; }
         uint64_t t_i_64_value = t_i_value.data[0];
         if (t_i_value.bitsize > 32) {
           t_i_64_value += ((uint64_t) t_i_value.data[1]) << 32;
@@ -388,7 +433,7 @@ void bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_val
       }
     }
     init_bvconstant(out_value);
-    bvconstant_copy64(out_value, p->bitsize, sum);
+    bvconstant_copy64(out_value, bitsize, sum);
     break;
   }
   case POWER_PRODUCT: {
@@ -396,26 +441,37 @@ void bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_val
     *eval_level = 0;
     // Start with out_value = 1
     uint32_t bitsize = term_bitsize(terms, t);
-    init_bvconstant(out_value);
-    bvconstant_set_bitsize(out_value, bitsize);
-    bvconst_set_one(out_value->data, out_value->width);
+    bvconstant_t tmp;
+    init_bvconstant(&tmp);
+    bvconstant_set_bitsize(&tmp, bitsize);
+    bvconst_set_one(tmp.data, tmp.width);
     for (uint32_t i = 0; i < t_pprod->len; ++ i) {
       term_t t_i = t_pprod->prod[i].var;
       uint32_t t_i_exp = t_pprod->prod[i].exp;
       bvconstant_t t_i_value;
       uint32_t eval_level_i = 0;
-      bv_evaluator_run_term(eval, t_i, &t_i_value, &eval_level_i);
+      if (!bv_evaluator_run_term(eval, t_i, &t_i_value, &eval_level_i)){
+        delete_bvconstant(&tmp);
+        return false;
+      }
+      if (t_i_value.bitsize < bitsize) { bitsize = t_i_value.bitsize; }
       if (eval_level_i > *eval_level) { *eval_level = eval_level_i; }
-      bvconst_mulpower(out_value->data, out_value->width, t_i_value.data, t_i_exp);
+      bvconst_mulpower(tmp.data, t_i_value.width, t_i_value.data, t_i_exp);
       delete_bvconstant(&t_i_value);
     }
-    bvconstant_normalize(out_value);
+    bvconstant_normalize(&tmp);
+    init_bvconstant(out_value);
+    bvconstant_copy(out_value, bitsize, tmp.data);
+    delete_bvconstant(&tmp);
     break;
   }
   default: { // Variables and foreign terms that are assigned in trail
     // Get the value from trail
     variable_t t_x = variable_db_get_variable_if_exists(var_db, t);
     assert(t_x != variable_null);
+    if (!trail_has_value(trail, t_x)){
+      return false;
+    }
     const mcsat_value_t* t_value = trail_get_value(trail, t_x);
     assert(t_value->type == VALUE_BV);
     // Variables and foreign terms
@@ -437,10 +493,11 @@ void bv_evaluator_run_term(bv_evaluator_t* eval, term_t t, bvconstant_t* out_val
   }
 
   bv_evaluator_set_term_cache(eval, t, out_value, *eval_level);
- }
+  return true;
+}
 
 static
-bool bv_evaluator_run_atom(bv_evaluator_t* eval, term_t t, uint32_t* eval_level) {
+bool bv_evaluator_run_atom(bv_evaluator_t* eval, term_t t, bool* out_value, uint32_t* eval_level) {
 
   if (ctx_trace_enabled(eval->ctx, "mcsat::bv::eval")) {
     ctx_trace_printf(eval->ctx, "Evaluating: ");
