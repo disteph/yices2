@@ -18,6 +18,7 @@
  
 #include "mcsat/utils/statistics.h"
 #include "utils/memalloc.h"
+#include "io/simple_printf.h"
 
 #include <inttypes.h>
 #include <assert.h>
@@ -97,6 +98,7 @@ void statistics_print(const statistics_t* stats, int out) {
     default:
       assert(false);
     }
+    /* print_buffer_append_uint32(&pb, current->data); // FROM master */
     print_buffer_append_string(&pb, "\n");
     write_buffer(out, &pb);
     current = current->next;
