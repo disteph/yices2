@@ -183,7 +183,6 @@ static void print_help(const char *progname) {
   fflush(stdout);
 }
 
-#if HAVE_MCSAT
 static void print_mcsat_help(const char *progname) {
   printf("Usage: %s [option] filename\n"
          "    or %s [option]\n\n", progname, progname);
@@ -197,7 +196,6 @@ static void print_mcsat_help(const char *progname) {
          "\n");
   fflush(stdout);
 }
-#endif
 
 /*
  * Message for unrecognized options or other errors on the command line.
