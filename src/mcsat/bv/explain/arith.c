@@ -57,19 +57,17 @@ typedef struct arith_s {
 
 } arith_t;
 
-// norm.var_cache and coeff_cache have dynamically allocated values
+// coeff_cache has dynamically allocated values
 // So before resetting or deleting those hash maps, one must free the memory of the stored values
 // which the following function does
 
 static inline void freeval(arith_t* exp) {
-  arith_norm_freeval(&exp->norm);
   for (ptr_hmap_pair_t* current = ptr_hmap_first_record(&exp->coeff_cache);
        current != NULL;
        current = ptr_hmap_next_record(&exp->coeff_cache, current)) {
     safe_free((polypair_t*) current->val);
   }
 }
-
 
 // Function returns the polypair_t (variable, coefficient, polyrest) of (normalised) u
 // if u is not a good term for the fragment:
@@ -161,79 +159,130 @@ polypair_t* bv_arith_coeff(arith_t* exp, term_t u, bool assume_fragment) {
     fprintf(out, "Not evaluable and not cached\n");
   }
 
-  polypair_t temp; // We don't know whether we'll be successful, we don't malloc
-  
-  temp.var   = NULL_TERM;
-  temp.coeff = 0;
-  temp.polyrest = NULL_TERM; 
+  arith_analyse_t* ts = arith_analyse(&exp->norm,t);
+  if (!arith_is_zero(terms, ts->garbage)){
+    if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+      FILE* out = ctx_trace_out(ctx);
+      fprintf(out, "Returning NULL because garbage was detected:\n");
+      ctx_trace_term(ctx, ts->garbage);
+    }
+    return NULL;
+  }
 
-  switch (term_kind(ctx->terms, t)) {
+  polypair_t temp; // We don't know whether we'll be successful, we don't malloc
+  temp.var      = NULL_TERM;
+  temp.polyrest = ts->eval; 
+  temp.coeff = 0;
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "Setting polyrest to ");
+    ctx_trace_term(ctx, temp.polyrest);
+  }
+
+  switch (term_kind(ctx->terms, ts->var)) {
   case BV_POLY: {
-    bvpoly_t* t_poly = bvpoly_term_desc(ctx->terms, t);
+    bvpoly_t* t_poly = bvpoly_term_desc(ctx->terms, ts->var);
+    assert(t_poly->bitsize == w);
     // If we extract more than 64 bits, we use regular coefficients for the bv_poly to produce
     // we construct that bv_poly from a bvarith_buffer_t called buffer:
     for (uint32_t i = 0; i < t_poly->nterms; ++ i) {
       term_t monom_var = t_poly->mono[i].var;
+      uint32_t* coeff  = t_poly->mono[i].coeff;
       if (monom_var != const_idx
           && !bv_evaluator_is_evaluable(&exp->norm.csttrail,monom_var)) {
-        if (temp.coeff != 0) // second unevaluable monomial?
+        if (temp.coeff != 0) { // second unevaluable monomial?
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "Returning NULL because of at least two unevaluable monomials in BV_POLY, namely\n");
+            ctx_trace_term(ctx, temp.var);
+            fprintf(out, "and\n");
+            ctx_trace_term(ctx, monom_var);
+          }
           return NULL;       // -> we're outside the fragment
+        }
         temp.var = monom_var;
-        if (bvconst_is_one(t_poly->mono[i].coeff, t_poly->width)) {
+        if (bvconst_is_one(coeff, t_poly->width)) {
           temp.coeff = 1;
         } else {
-          if (bvconst_is_minus_one(t_poly->mono[i].coeff, t_poly->bitsize))
+          if (bvconst_is_minus_one(coeff, w))
             temp.coeff = -1;
-          else
+          else {
+            if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+              FILE* out = ctx_trace_out(ctx);
+              fprintf(out, "Returning NULL because coefficient of monomial\n");
+              ctx_trace_term(ctx, temp.var);
+              fprintf(out, "is not 1 or -1, but is\n");
+              bvconst_print(out, coeff, w);
+            }
             return NULL;
+          }
         }
       }
     }
     break;
   }
   case BV64_POLY: {
-    bvpoly64_t* t_poly = bvpoly64_term_desc(ctx->terms, t);
+    bvpoly64_t* t_poly = bvpoly64_term_desc(ctx->terms, ts->var);
     // Now going into each monomial
     for (uint32_t i = 0; i < t_poly->nterms; ++ i) {
       term_t monom_var = t_poly->mono[i].var;
       if (monom_var != const_idx
           && !bv_evaluator_is_evaluable(&exp->norm.csttrail,monom_var)) {
-        if (temp.coeff != 0) // second unevaluable monomial?
+        if (temp.coeff != 0) {// second unevaluable monomial?
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "Returning NULL because of at least two unevaluable monomials in BV64_POLY, namely\n");
+            ctx_trace_term(ctx, temp.var);
+            fprintf(out, "and\n");
+            ctx_trace_term(ctx, monom_var);
+          }
           return NULL;       // -> we're outside the fragment
+        }
         temp.var = monom_var;
         if (t_poly->mono[i].coeff == 1) {
           temp.coeff = 1;
         } else {
-          if (bvconst64_is_minus_one(t_poly->mono[i].coeff,term_bitsize(ctx->terms,t)))
+          if (bvconst64_is_minus_one(t_poly->mono[i].coeff,w))
             temp.coeff = -1;
-          else
+          else{
+            if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+              FILE* out = ctx_trace_out(ctx);
+              fprintf(out, "Returning NULL because coefficient of monomial\n");
+              ctx_trace_term(ctx, temp.var);
+              fprintf(out, "is not 1 or -1, but is %ld\n",t_poly->mono[i].coeff);
+            }
             return NULL;
+          }
         }
       }
     }
     break;
   }
   case BV_ARRAY: {
-    temp.var = t;   // the temp.var is t
+    temp.var = ts->var;   // the temp.var is t
     temp.coeff = 1; // with coeff 1
-    temp.polyrest = arith_zero(tm, w);
     break;
   }
   default: {
-    return NULL;
+    if (ts->var != conflict_var) return NULL;
+    temp.var = ts->var;   // the temp.var is t
+    temp.coeff = 1; // with coeff 1
   }
   }
 
   assert(temp.var != NULL_TERM);
   assert(temp.coeff == 1 || temp.coeff == -1);
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "Identified variable as ");
+    ctx_trace_term(ctx, temp.var);
+    fprintf(out, "Now we analyse this variable.");
+  }
 
-  if (temp.polyrest == NULL_TERM)
-    temp.polyrest = (temp.coeff == 1) ?
-      arith_sub(tm, t, temp.var) :
-      arith_add(tm, t, temp.var) ;
-
-  arith_analyse_t* ts = arith_analyse(&exp->norm,temp.var,w);
-  if (ts->nobueno) return NULL;
+  ts = arith_analyse(&exp->norm,temp.var);
+  assert(arith_is_zero(terms, ts->eval));
+  assert(arith_is_zero(terms, ts->garbage));
+  assert(ts->var == temp.var);
   assert(ts->length > 0); // Otherwise t would be evaluable (already checked)
   assert(ts->base != NULL_TERM);
   assert(!ts->intros);    // Should not have introduced new constructs
@@ -260,11 +309,6 @@ polypair_t* bv_arith_coeff(arith_t* exp, term_t u, bool assume_fragment) {
   }
 
   // OK, now we know or we assume we are in the fragment
-
-  temp.polyrest = (temp.coeff == 1) ?
-    arith_add(tm, temp.polyrest, ts->eval) :
-    arith_sub(tm, temp.polyrest, ts->eval) ;
-  temp.var = ts->var;
 
   entry = ptr_hmap_get(&exp->coeff_cache, t);
   polypair_t* result = safe_malloc(sizeof(polypair_t)); // We know we're successful, we malloc
@@ -350,7 +394,9 @@ interval_t* bv_arith_unit_le(arith_t* exp, term_t lhs, term_t rhs, bool b) {
   /* assert(arith_normalise(&exp->norm, rhs) == rhs); */
     
   polypair_t* left  = bv_arith_coeff(exp, lhs, true);
+  assert(left != NULL);
   polypair_t* right = bv_arith_coeff(exp, rhs, true);
+  assert(left != NULL);
     
   if ((left->coeff == -1) || (right->coeff == -1)) {
     // if coeff is negative, we add one, negate and swap sides.
@@ -1016,8 +1062,8 @@ void transform_interval(arith_t* exp, interval_t** interval) {
     }
 
     // We analyse the shape of the variable whose value is forbidden to be in interval[0]
-    arith_analyse_t* ts = arith_analyse(&exp->norm,interval[0]->var,w);
-    assert(!ts->nobueno);    // Otherwise it wouldn't be in the fragment
+    arith_analyse_t* ts = arith_analyse(&exp->norm,interval[0]->var);
+    assert(arith_is_zero(terms, ts->garbage));    // Otherwise it wouldn't be in the fragment
     assert(ts->length != 0); // Otherwise the term is evaluable
     assert(arith_is_zero(terms, ts->eval)); // The variable should only have zeros as evaluable bits
     assert(ts->base != NULL_TERM); // There should be a base
@@ -1127,7 +1173,8 @@ void bvarith_explain(bv_subexplainer_t* this,
     term_t t1prime = NULL_TERM;
 
     if (term_kind(terms, atom_i_term) == BIT_TERM) {
-      t0prime = term_extract(tm, atom_i_term, 0, 1);
+      term_t t0 = arith_normalise(&exp->norm, atom_i_term);
+      t0prime = term_extract(tm, t0, 0, 1);
       t1prime = arith_add_one(tm, arith_zero(tm, 1));
     } else {
       composite_term_t* atom_i_comp = composite_term_desc(terms, atom_i_term);
@@ -1136,6 +1183,8 @@ void bvarith_explain(bv_subexplainer_t* this,
       term_t t1 = atom_i_comp->arg[1];
       assert(is_pos_term(t0));
       assert(is_pos_term(t1));
+      t0 = arith_normalise(&exp->norm, t0);
+      t1 = arith_normalise(&exp->norm, t1);
 
       switch (term_kind(terms, atom_i_term)) {
       case BV_GE_ATOM: {  
@@ -1267,11 +1316,6 @@ void bvarith_explain(bv_subexplainer_t* this,
       fprintf(out,"[%d]",i);
       ctx_trace_term(ctx, reasons_out->data[i]);
     }
-  }
-
-  if (ctx_trace_enabled(ctx, "mcsat::bv::arith::count")) {
-    FILE* out = ctx_trace_out(ctx);
-    fprintf(out, "A job well done\n");
   }
 }
 
@@ -1446,13 +1490,6 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
       break;
     }
     }
-    if (!result) {
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith::count")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "I am le tired\n");
-      }
-      break;
-    }
   }
   return result;
 }
@@ -1474,6 +1511,7 @@ static
 void destruct(bv_subexplainer_t* this) {
   arith_t* exp = (arith_t*) this;
   bv_evaluator_csttrail_destruct(&exp->norm.csttrail);
+  arith_norm_freeval(&exp->norm);
   freeval(exp);
   delete_arith_norm(&exp->norm);
   delete_ptr_hmap(&exp->coeff_cache);
