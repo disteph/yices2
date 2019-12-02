@@ -95,6 +95,8 @@ struct param_s {
    *   in a conflict resolution
    * - parameter tclause_size controls the lemma size: only theory lemmas
    *   of size <= tclause_size are turned into learned clauses
+   * - one_conflict_MCSAT tells the solver to try MCSAT up to the first conflict,
+   *   or to the SAT answer, whichever comes first.
    */
   double   var_decay;       // decay factor for variable activity
   float    randomness;      // probability of a random pick in select_unassigned_literal
@@ -103,7 +105,8 @@ struct param_s {
   float    clause_decay;    // decay factor for learned-clause activity
   bool     cache_tclauses;
   uint32_t tclause_size;
-
+  bool     one_conflict_MCSAT; // attempts MCSAT up to first conflict
+  
   /*
    * EGRAPH PARAMETERS
    *

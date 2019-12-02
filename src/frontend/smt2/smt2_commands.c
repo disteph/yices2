@@ -2863,7 +2863,6 @@ static void check_delayed_assertions(smt2_globals_t *g) {
       g->logic_code = QF_IDL;
     }
     init_smt2_context(g);
-
     if (g->export_to_dimacs) {
       /*
        * Bitblast and export in DIMACS format.
@@ -2885,6 +2884,7 @@ static void check_delayed_assertions(smt2_globals_t *g) {
 	return;
       }
       init_search_parameters(g);
+
       if (g->random_seed != 0) {
 	g->parameters.random_seed = g->random_seed;
       }
@@ -4674,6 +4674,10 @@ static bool yices_get_option(smt2_globals_t *g, yices_param_t p) {
     print_uint32_value(g->parameters.tclause_size);
     break;
 
+  case PARAM_ONE_CONFLICT_MCSAT:
+    print_boolean_value(g->parameters.one_conflict_MCSAT);
+    break;
+
   case PARAM_DYN_ACK:
     print_boolean_value(g->parameters.use_dyn_ack);
     break;
@@ -4794,6 +4798,14 @@ static bool yices_get_option(smt2_globals_t *g, yices_param_t p) {
     print_terms_value(g,g->mcsat_options.var_order);
     break;
     
+  case PARAM_MCSAT_ONE_CONFLICT:
+    print_boolean_value(g->mcsat_options.one_conflict);
+    break;
+
+  case PARAM_MCSAT_FINAL_CONFLICT:
+    print_boolean_value(g->mcsat_options.final_conflict);
+    break;
+
   case PARAM_UNKNOWN:
   default:
     freport_bug(g->err,"invalid parameter id in 'yices_get_option'");
@@ -5245,6 +5257,12 @@ static void yices_set_option(smt2_globals_t *g, const char *param, const param_v
     }
     break;
 
+  case PARAM_ONE_CONFLICT_MCSAT:
+    if (param_val_to_bool(param, val, &tt, &reason)) {
+      g->parameters.one_conflict_MCSAT = tt;
+    }
+    break;
+
   case PARAM_DYN_ACK:
     if (param_val_to_bool(param, val, &tt, &reason)) {
       g->parameters.use_dyn_ack = tt;
@@ -5471,6 +5489,26 @@ static void yices_set_option(smt2_globals_t *g, const char *param, const param_v
       context = g->ctx;
       if (context != NULL) {
         context->mcsat_options.var_order = terms;
+      }
+    }
+    break;
+
+  case PARAM_MCSAT_ONE_CONFLICT:
+    if (param_val_to_bool(param, val, &tt, &reason)) {
+      g->mcsat_options.one_conflict = tt;
+      context = g->ctx;
+      if (context != NULL) {
+        context->mcsat_options.one_conflict = tt;
+      }
+    }
+    break;
+
+  case PARAM_MCSAT_FINAL_CONFLICT:
+    if (param_val_to_bool(param, val, &tt, &reason)) {
+      g->mcsat_options.final_conflict = tt;
+      context = g->ctx;
+      if (context != NULL) {
+        context->mcsat_options.final_conflict = tt;
       }
     }
     break;

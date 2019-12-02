@@ -67,6 +67,8 @@ typedef enum yices_param {
   PARAM_CLAUSE_DECAY,
   PARAM_CACHE_TCLAUSES,
   PARAM_TCLAUSE_SIZE,
+  // MCSAT up to first conflict before Yices
+  PARAM_ONE_CONFLICT_MCSAT,
   // egraph parameters
   PARAM_DYN_ACK,
   PARAM_DYN_BOOL_ACK,
@@ -103,6 +105,8 @@ typedef enum yices_param {
   PARAM_MCSAT_NRA_BOUND_MAX,
   PARAM_MCSAT_BV_VAR_SIZE,
   PARAM_MCSAT_VAR_ORDER,
+  PARAM_MCSAT_ONE_CONFLICT,
+  PARAM_MCSAT_FINAL_CONFLICT,
   // error
   PARAM_UNKNOWN
 } yices_param_t;

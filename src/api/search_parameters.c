@@ -72,7 +72,7 @@
 #define DEFAULT_CLAUSE_DECAY   CLAUSE_DECAY_FACTOR
 #define DEFAULT_CACHE_TCLAUSES false
 #define DEFAULT_TCLAUSE_SIZE   0
-
+#define DEFAULT_ONE_CONFLICT_MCSAT false
 
 /*
  * Default random seed as in smt_core.d
@@ -143,6 +143,7 @@ static const param_t default_settings = {
   DEFAULT_CLAUSE_DECAY,
   DEFAULT_CACHE_TCLAUSES,
   DEFAULT_TCLAUSE_SIZE,
+  DEFAULT_ONE_CONFLICT_MCSAT,
 
   DEFAULT_USE_DYN_ACK,
   DEFAULT_USE_BOOL_DYN_ACK,
@@ -199,6 +200,8 @@ typedef enum param_key {
   PARAM_CLAUSE_DECAY,
   PARAM_CACHE_TCLAUSES,
   PARAM_TCLAUSE_SIZE,
+  // trying MCSAT for one conflict
+  PARAM_ONE_CONFLICT_MCSAT,
   // egraph parameters
   PARAM_DYN_ACK,
   PARAM_DYN_BOOL_ACK,
@@ -249,6 +252,7 @@ static const char *const param_key_names[NUM_PARAM_KEYS] = {
   "max-interface-eqs",
   "max-update-conflicts",
   "optimistic-final-check",
+  "one-conflict-MCSAT",
   "prop-threshold",
   "r-factor",
   "r-fraction",
@@ -286,6 +290,7 @@ static const int32_t param_code[NUM_PARAM_KEYS] = {
   PARAM_MAX_INTERFACE_EQS,
   PARAM_MAX_UPDATE_CONFLICTS,
   PARAM_OPTIMISTIC_FCHECK,
+  PARAM_ONE_CONFLICT_MCSAT,
   PARAM_PROP_THRESHOLD,
   PARAM_R_FACTOR,
   PARAM_R_FRACTION,
@@ -572,6 +577,10 @@ int32_t params_set_field(param_t *parameters, const char *key, const char *value
     if (r == 0) {
       parameters->tclause_size = (uint32_t) z;
     }
+    break;
+
+  case PARAM_ONE_CONFLICT_MCSAT:
+    r = set_bool_param(value, &parameters->one_conflict_MCSAT);
     break;
 
   case PARAM_DYN_ACK:

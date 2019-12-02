@@ -577,7 +577,16 @@ smt_status_t check_context(context_t *ctx, const param_t *params) {
   stat = smt_status(core);
   if (stat == STATUS_IDLE) {
     // clean state: the search can proceed
+    assert(false);
     context_set_search_parameters(ctx, params);
+
+    if (params->one_conflict_MCSAT) {
+      ctx->mcsat_options.one_conflict = true;
+      assert(false);
+      call_mcsat_solver(ctx, params);
+    }
+    
+    assert(false);
     solve(core, params, 0, NULL);
     stat = smt_status(core);
   }
