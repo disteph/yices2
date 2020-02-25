@@ -57,6 +57,13 @@ typedef struct arith_s {
   // Cache of polynomial analyses (function bv_arith_coeff below): for a (normalised) term t (the key), the value is the polypair_t resulting from analysing t
   ptr_hmap_t coeff_cache;
 
+  // For each unevaluable term, for each of its bits, what evaluable term the bit must be equal to
+  ptr_hmap_t term_constraints;
+  // Conflict as simplified by can_explain_conflict
+  ivector_t conflict_t;
+  // Conflict as simplified by can_explain_conflict
+  ivector_t conflict_v; // 0/1 for false/true
+
 } arith_t;
 
 // coeff_cache has dynamically allocated values
@@ -1124,6 +1131,256 @@ void transform_interval(arith_t* exp, interval_t** interval) {
   }
 }
 
+// The following function normalises a conflict
+static
+void add_constraint(arith_t* exp, term_t t, bool v) {
+  assert(is_boolean_term(exp->norm.csttrail.ctx->terms, t)); 
+  ivector_push(&exp->conflict_t, unsigned_term(t));
+  ivector_push(&exp->conflict_v, (is_pos_term(t) == v) ? 1 : 0);
+}
+
+// The following function normalises a conflict
+static
+void conflict_reduce(arith_t* exp, const ivector_t* reasons_in) {
+
+  bv_csttrail_t* csttrail = &exp->norm.csttrail;
+  plugin_context_t* ctx   = csttrail->ctx;
+  
+  // Standard abbreviations
+  term_table_t* terms        = ctx->terms;
+  term_manager_t* tm         = ctx->tm;
+  const mcsat_trail_t* trail = ctx->trail;
+
+  uint32_t n = reasons_in->size;
+  assert(n!=0);
+
+  // Variables that are going to be re-used for every item in reasons_in
+  variable_t atom_i_var;
+  bool       atom_i_value;
+  term_t     atom_i_term;
+
+  // We go through reasons_in
+  for (uint32_t i = 0; i < n; i++) {
+    atom_i_var   = reasons_in->data[i];
+    atom_i_value = trail_get_boolean_value(trail, atom_i_var);
+    atom_i_term  = variable_db_get_term(ctx->var_db, atom_i_var);
+
+    assert(good_term(terms,atom_i_term) && is_pos_term(atom_i_term));
+    assert(is_boolean_term(terms, atom_i_term));
+
+    // We first scan the atom (collecting free variables and co.)
+    bv_evaluator_csttrail_scan(csttrail, atom_i_var);
+    // We look at whether the literal is an equality between bitvectors of size w,
+    // or a variant thereof. We start by computing w if that's the case.
+    uint32_t w;
+    switch (term_kind(terms, atom_i_term)) {
+    case EQ_TERM :     
+    case BV_EQ_ATOM: {
+      composite_term_t* atom_i_comp = composite_term_desc(terms, atom_i_term);
+      assert(atom_i_comp->arity == 2);
+      term_t t0 = atom_i_comp->arg[0];
+      w = bv_term_bitsize(terms, t0);
+      break;
+    }
+    default: { w = 1; }
+    }
+    // Now in case the literal is an equality between bitvectors (of size w)
+    // we store the left-hand bits and right-hand bits in b0 and b1.
+    // Each cell will be a Boolean term.
+    term_t b0[w]; // left-hand bits
+    term_t b1[w]; // right-hand bits
+    bool is_needed = false; // Whether we still need the conflict literal after our processing
+    
+    switch (term_kind(terms, atom_i_term)) {
+    case BIT_TERM : { // This is equivalent to an equality between bitvectors of size 1
+      term_t atom_norm = arith_normalise(&exp->norm, atom_i_term);
+      assert(is_boolean_term(terms, atom_norm));
+      b0[0] = atom_norm;
+      b1[0] = atom_i_value ? true_term : false_term;
+      break;
+    }
+    case EQ_TERM :     
+    case BV_EQ_ATOM: {
+      composite_term_t* atom_i_comp = composite_term_desc(terms, atom_i_term);
+      term_t t0   = term_extract(tm, atom_i_comp->arg[0], 0, w);
+      term_t t1   = term_extract(tm, atom_i_comp->arg[1], 0, w);
+      bool isdec0 = (term_kind(terms, t0) == BV_ARRAY)
+        && (!bv_evaluator_is_evaluable(csttrail, t0));
+      bool isdec1 = (term_kind(terms, t1) == BV_ARRAY)
+        && (!bv_evaluator_is_evaluable(csttrail, t1));
+      if (!atom_i_value && w == 1) {
+        // Disequality between bitvectors of size 1 turned into an equality
+        b0[0] = mk_bitextract(tm, t0, 0); // First and only left-hand bit as a Boolean term
+        b1[0] = not_term(terms,mk_bitextract(tm, t1, 0)); // Right-hand side, with negation
+      } else if (atom_i_value && (isdec0 || isdec1)) {
+        // Otherwise we only do something if it is an equality (not a disequality)
+        // and at least one side is a BV_ARRAY that can't be evaluated.
+        arith_normalise_bvarray(&exp->norm, t0, w, b0);
+        arith_normalise_bvarray(&exp->norm, t1, w, b1);
+      } else { // Otherwise we do nothing and keep the literal as is.
+        is_needed = true;
+      }
+      break;
+    }
+    default: { is_needed = true; } // Same rationale: we keep the literal as is.
+    }
+
+    if (!is_needed) { // If we decided we were going to simplify the literal, then:
+      // We range over the w bits, looking at both sides
+      // A bit (index) j is "bad" if both sides are unevaluable, is "good" otherwise
+
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+        FILE* out = ctx_trace_out(ctx);
+        fprintf(out, "\nbv_arith reduces core constraint (%s): ",atom_i_value?"T":"F");
+        ctx_trace_term(ctx, atom_i_term);
+      }
+
+      uint32_t last_good_plus_one = 0; // index of the last good bit plus one
+      bool uneval0 = !bv_evaluator_is_evaluable(csttrail, b0[0]);
+      bool uneval1 = !bv_evaluator_is_evaluable(csttrail, b1[0]);
+
+      for (uint32_t j = 0; j < w; ) {
+
+        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+          FILE* out = ctx_trace_out(ctx);
+          fprintf(out, "\nbit %d\n",j);
+          ctx_trace_term(ctx, b0[j]);
+          ctx_trace_term(ctx, b1[j]);
+        }
+
+        if (uneval0 && uneval1) { // Bit j is unevaluable on both sides: bit is BAD
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "BAD (%s,%s)\n",uneval0?"uneval":"eval",uneval1?"uneval":"eval");
+          }
+          j++; // Moving on. Now we peek at whether next bit is good or bad
+          if (j < w) {
+            uneval0 = !bv_evaluator_is_evaluable(csttrail, b0[j]);
+            uneval1 = !bv_evaluator_is_evaluable(csttrail, b1[j]);
+          }
+          if (j == w || !uneval0 || !uneval1) {
+            // if next bit is good, or if we have reached w (the end of the loop)
+            // we need to close the bad section we're in.
+            uint32_t length = j - last_good_plus_one; // Length of bad section
+            assert(j > 0);
+            term_t left  = mk_bvarray(tm, length, b0+last_good_plus_one);
+            term_t right = mk_bvarray(tm, length, b1+last_good_plus_one);
+            assert(is_bitvector_term(tm->terms, left));
+            assert(is_bitvector_term(tm->terms, right));
+            // The bad section should be unevaluable on both side
+            assert(!bv_evaluator_is_evaluable(csttrail, left));
+            assert(!bv_evaluator_is_evaluable(csttrail, right));
+            add_constraint(exp, mk_eq(tm,left,right), true);
+            for (uint32_t k = last_good_plus_one; k < j; k++) {
+              b0[k] = false_term; // Erase bit k
+              b1[k] = false_term; // on both sides
+            }
+          }
+        } else {
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "GOOD (%s,%s)\n",uneval0?"uneval":"eval",uneval1?"uneval":"eval");
+          }
+          if (uneval0 != uneval1) { // Bit j is evaluable on exactly one side
+            term_t master = uneval0 ? b0[j] : b1[j];
+            term_t slave  = uneval0 ? b1[j] : b0[j];
+            b0[j] = false_term; // no longer needed
+            b1[j] = false_term; // no longer needed
+            if (is_neg_term(master)) { // Make sure unevaluable side is positive term
+              master = not_term(terms,master);
+              slave  = not_term(terms,slave);
+            }
+            if (term_kind(terms, master) == BIT_TERM){
+              uint32_t index = bit_term_index(terms, master);  // Get selected bit
+              term_t t       = bit_term_arg(terms, master);    // Get the base
+              uint32_t bs    = bv_term_bitsize(terms, t);
+              ptr_hmap_pair_t* entry = ptr_hmap_get(&exp->term_constraints, t);
+              if (entry->val == NULL) {
+                term_t* tbits = safe_malloc(bs*sizeof(term_t));
+                for (uint32_t k = 0; k < bs; k++) tbits[k] = NULL_TERM;
+                entry->val    = (void*) tbits;
+              }
+              term_t* tbits = (term_t*) entry->val;
+              if (tbits[index] == NULL_TERM)
+                tbits[index] = slave;
+              else {
+                b0[j] = uneval0 ? tbits[index] : slave;
+                b1[j] = uneval0 ? slave : tbits[index];
+              }
+            } else { // If unevaluable side is not accessing some bit of some base, turn bit j into its own equality constraint
+              term_t left  = term_extract(tm, master, 0, 1);
+              term_t right = term_extract(tm, slave, 0, 1);
+              add_constraint(exp, mk_eq(tm,left,right), true);
+            }
+          } // If Bit j is evaluable on both sides, nothing specific to do
+          j++;
+          if (j < w) {
+            uneval0 = !bv_evaluator_is_evaluable(csttrail, b0[j]);
+            uneval1 = !bv_evaluator_is_evaluable(csttrail, b1[j]);
+          }
+          last_good_plus_one = j;
+        }
+      }
+      // Now constructing the equality between evaluable bits
+      term_t left  = mk_bvarray(tm, w, b0);
+      term_t right = mk_bvarray(tm, w, b1);
+      assert(is_bitvector_term(tm->terms, left));
+      assert(is_bitvector_term(tm->terms, right));
+      assert(bv_evaluator_is_evaluable(csttrail, left));
+      assert(bv_evaluator_is_evaluable(csttrail, right));
+      add_constraint(exp, mk_eq(tm,left,right), true);
+    } else {
+      add_constraint(exp, atom_i_term, atom_i_value);
+    }
+  }
+
+  // We finished ranging over the conflict literals
+  // Now we look at the constraints in the hashmap and recreate literals for them
+  for (ptr_hmap_pair_t* current = ptr_hmap_first_record(&exp->term_constraints);
+       current != NULL;
+       current = ptr_hmap_next_record(&exp->term_constraints, current)) {
+    term_t t = current->key;
+    if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+      FILE* out = ctx_trace_out(ctx);
+      fprintf(out, "Constraint for uneval term ");
+      ctx_trace_term(ctx, t);
+    }
+    uint32_t w    = bv_term_bitsize(terms, t);
+    term_t* tbits = (term_t*) current->val;
+    assert(tbits != NULL);
+    uint32_t section_start = 0;
+    for (uint32_t j = 0; j < w; ) {
+      if (tbits[j] == NULL_TERM) {
+        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+          FILE* out = ctx_trace_out(ctx);
+          fprintf(out, "NULL\n");
+        }
+        j++;
+        section_start = j;
+      } else {
+        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+          FILE* out = ctx_trace_out(ctx);
+          fprintf(out, "bit %d must be\n",j);
+          ctx_trace_term(ctx, tbits[j]);
+        }
+        assert(bv_evaluator_is_evaluable(csttrail, tbits[j]));
+        j++;
+        if (j == w || tbits[j] == NULL_TERM) {
+          uint32_t length = j - section_start;
+          term_t left  = term_extract(tm, t, section_start, j);
+          term_t right = mk_bvarray(tm, length, tbits + section_start);
+          assert(is_bitvector_term(tm->terms, left));
+          assert(is_bitvector_term(tm->terms, right));
+          assert(!bv_evaluator_is_evaluable(csttrail, left));
+          assert(bv_evaluator_is_evaluable(csttrail, right));
+          add_constraint(exp, mk_eq(tm,left,right), true);
+        }
+      }
+    }
+    safe_free((term_t*) current->val);
+  }
+  
+}
 
 static
 void bvarith_explain(bv_subexplainer_t* this,
@@ -1135,32 +1392,39 @@ void bvarith_explain(bv_subexplainer_t* this,
   arith_t* exp = (arith_t*) this;
   plugin_context_t* ctx = this->ctx;
   bv_evaluator_t* eval = this->eval;
+  const mcsat_trail_t* trail = ctx->trail;
   
   bv_evaluator_clear_cache(eval);
 
   // Standard abbreviations
   term_table_t* terms        = ctx->terms;
-  const mcsat_trail_t* trail = ctx->trail;
   term_manager_t* tm         = ctx->tm;
   assert(exp->norm.csttrail.conflict_var == var); 
 
-  // Each constraint from reasons_in will be translated into 1 forbidden interval
-  // We keep them in an array of the same size as reasons_in
-  uint32_t n = reasons_in->size;
-  assert(n!=0);
-  interval_t* intervals[n];
-
   // Variables that are going to be re-used for every item in reasons_in
   variable_t atom_i_var;
-  bool       atom_i_value;
   term_t     atom_i_term;
+  bool       atom_i_value;
+
+  // reasons_out always contain reasons_in
+  for (uint32_t i = 0; i < reasons_in->size; i++) {
+    atom_i_var   = reasons_in->data[i];
+    atom_i_term  = variable_db_get_term(ctx->var_db, atom_i_var);
+    atom_i_value = trail_get_boolean_value(trail, atom_i_var);
+    ivector_push(reasons_out, atom_i_value?atom_i_term:not_term(terms, atom_i_term));
+  }
+
+  // Each constraint from reasons_in will be translated into 1 forbidden interval
+  // We keep them in an array of the same size as reasons_in
+  uint32_t n = exp->conflict_t.size;
+  assert(n!=0);
+  interval_t* intervals[n];
 
   // We go through reasons_in
   for (uint32_t i = 0; i < n; i++) {
     
-    atom_i_var   = reasons_in->data[i];
-    atom_i_value = trail_get_boolean_value(trail, atom_i_var);
-    atom_i_term  = variable_db_get_term(ctx->var_db, atom_i_var);
+    atom_i_term  = exp->conflict_t.data[i];
+    atom_i_value = (1 == exp->conflict_v.data[i]);
 
     assert(good_term(terms,atom_i_term) && is_pos_term(atom_i_term));
     assert(is_boolean_term(terms, atom_i_term));
@@ -1170,9 +1434,6 @@ void bvarith_explain(bv_subexplainer_t* this,
       fprintf(out, "\nbv_arith treats core constraint (%s): ",atom_i_value?"T":"F");
       ctx_trace_term(ctx, atom_i_term);
     }
-
-    // reasons_out always contains reasons_in:
-    ivector_push(reasons_out, atom_i_value?atom_i_term:not_term(terms, atom_i_term));
 
     term_t t0prime = NULL_TERM;
     term_t t1prime = NULL_TERM;
@@ -1351,6 +1612,9 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
   freeval(exp);
   reset_arith_norm(&exp->norm);
   ptr_hmap_reset(&exp->coeff_cache);
+  ptr_hmap_reset(&exp->term_constraints);
+  ivector_reset(&exp->conflict_t);
+  ivector_reset(&exp->conflict_v);
   
   if (ctx_trace_enabled(ctx, "mcsat::bv::arith::count")) {
     FILE* out = ctx_trace_out(ctx);
@@ -1360,15 +1624,15 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
     fprintf(out, "\n");
   }
 
-
-  // We go through the conflict core
-  for (uint32_t i = 0; i < conflict_core->size; i++) {
+  conflict_reduce(exp,conflict_core);
+  uint32_t n = exp->conflict_t.size;
+    
+  // We go through the reduced conflict
+  for (uint32_t i = 0; i < n; i++) {
       
     // Atom and its term
-    variable_t atom_var   = conflict_core->data[i];
-    term_t     atom_term  = variable_db_get_term(ctx->var_db, atom_var);
+    term_t atom_term  = exp->conflict_t.data[i];
 
-    assert(is_pos_term(atom_term));
 
     if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
       FILE* out = ctx_trace_out(ctx);
@@ -1377,6 +1641,8 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
       fprintf(out, "with the conflict_variable being ");
       ctx_trace_term(ctx, csttrail->conflict_var_term);
     }
+
+    assert(is_pos_term(atom_term));
 
     switch (term_kind(terms, atom_term)) {
     case EQ_TERM : 
@@ -1388,8 +1654,6 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
       term_t t0 = atom_comp->arg[0];
       term_t t1 = atom_comp->arg[1];
       assert(is_pos_term(t0) && is_pos_term(t1));
-      // OK, maybe we can treat the constraint atom_term. We first scan the atom (collecting free variables and co.)
-      bv_evaluator_csttrail_scan(csttrail, atom_var);
       
       // Now that we have collected the free variables, we look into the constraint structure
       polypair_t* p0 = bv_arith_coeff(exp, t0, false);
@@ -1458,8 +1722,6 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
     }
     case BIT_TERM: {
       assert(is_pos_term(bit_term_arg(terms, atom_term)));
-      // OK, maybe we can treat the constraint atom_term. We first scan the atom (collecting free variables and co.)
-      bv_evaluator_csttrail_scan(csttrail, atom_var);
       
       // Now that we have collected the free variables, we look into the constraint structure
       polypair_t* p = bv_arith_coeff(exp, term_extract(tm, atom_term, 0, 1), false);
@@ -1520,6 +1782,9 @@ void destruct(bv_subexplainer_t* this) {
   freeval(exp);
   delete_arith_norm(&exp->norm);
   delete_ptr_hmap(&exp->coeff_cache);
+  delete_ptr_hmap(&exp->term_constraints);
+  delete_ivector(&exp->conflict_t);
+  delete_ivector(&exp->conflict_v);
 }
 
 /** Allocate the sub-explainer and setup the methods */
@@ -1538,6 +1803,9 @@ bv_subexplainer_t* arith_new(plugin_context_t* ctx, watch_list_manager_t* wlm, b
 
   init_arith_norm(&exp->norm);
   init_ptr_hmap(&exp->coeff_cache, 0);
+  init_ptr_hmap(&exp->term_constraints, 0);
+  init_ivector(&exp->conflict_t, 0);
+  init_ivector(&exp->conflict_v, 0);
 
   return (bv_subexplainer_t*) exp;
 }

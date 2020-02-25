@@ -88,6 +88,7 @@ typedef struct arith_norm_s {
 
 void arith_norm_freeval(arith_norm_t* norm);
 arith_analyse_t* arith_analyse(arith_norm_t* norm, term_t t);
+void arith_normalise_bvarray(arith_norm_t* norm, term_t u, uint32_t w, term_t* ebits);
 term_t arith_normalise_upto(arith_norm_t* norm, term_t t, uint32_t w);
 
 static inline

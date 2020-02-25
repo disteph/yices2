@@ -551,6 +551,99 @@ term_t finalise(arith_norm_t* norm, term_t original, arith_analyse_t* s){
 
 
 // Extracting the w lowest bits of t, normalising on the way
+void arith_normalise_bvarray(arith_norm_t* norm, term_t u, uint32_t w, term_t* ebits){
+
+  bv_csttrail_t* csttrail = &norm->csttrail;
+  plugin_context_t* ctx = csttrail->ctx;
+  term_manager_t* tm    = ctx->tm;
+  term_table_t* terms   = ctx->terms;
+
+  // First, we eliminate BIT_TERM-over-BV_ARRAYs:
+  for (uint32_t i = 0; i < w; i++)
+    ebits[i] = bv_bitterm(terms, mk_bitextract(tm, u, i));
+    
+  // Hand-made hash map (we want it light, non-redimensionable,
+  // and we can do so because we know the max size is w).
+  // In each cell i, there are 4 integers:
+  // preproc[0][i] is the key, which is a term_t, let's call it k
+  // preproc[1][i] is the maximum i such that k[i] is a bit of this bv_array, let's call it top; then:
+  // preproc[1][i] is the term_t arith_normalise_upto(k,top+1) (normalised version of k over the lowest top+1 bits), let's call it norm
+  // preproc[2][i] is the value returned by bv_evaluator_not_free_up_to(norm), let's call it maxeval
+  // preproc[3][i] is the term_t arith_normalise_upto(norm,maxeval), if maxeval is not 0
+  term_t preproc[4][w];
+  // We initialise the hashmap
+  fix_htbl_init(preproc[0], w);
+      
+  // Now we range over the bits of the t bv_array of the form base[index], and we fill-in preproc[0][*] and preproc[1][*]
+  for (uint32_t i = 0; i < w; i++) {
+    term_t t_i = ebits[i];        // The Boolean term that constitutes bit i of t
+    if (term_kind(terms, t_i) == BIT_TERM) { // Is it of the form base[index] ?
+      uint32_t index = bit_term_index(terms, t_i);  // Get selected bit
+      term_t base    = bit_term_arg(terms, t_i);    // Get the base
+      assert(term_kind(terms, base) != BV_ARRAY);
+      uint32_t key_index = fix_htbl_index(preproc[0],w,base);
+      if (preproc[0][key_index] == NULL_TERM
+          || preproc[1][key_index] < index)
+        preproc[1][key_index] = index;
+      if (preproc[0][key_index] == NULL_TERM)
+        preproc[0][key_index] = base;
+    }
+  }
+
+  // Now we fill-in preproc[1][*], preproc[2][*], preproc[3][*], normalising recursively
+  for (uint32_t i = 0; i < w; i++) {
+    if (preproc[0][i] != NULL_TERM) {
+      uint32_t size = preproc[1][i] + 1;
+      preproc[1][i] = arith_normalise_upto(norm, preproc[0][i], size);
+      preproc[2][i] = bv_evaluator_not_free_up_to(&norm->csttrail, preproc[1][i]);
+      if (preproc[2][i] > size)
+        preproc[2][i] = size;
+      if (preproc[2][i] > 0) {
+        preproc[3][i] = (preproc[2][i] == size) ?
+          preproc[1][i] :
+          arith_normalise_upto(norm, preproc[1][i], preproc[2][i]);
+      }
+    }
+  }
+
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "Finished filling-in preproc with recursive normalisation, now going through the bits in order.\n");
+  }
+
+  // Now we range over the bits of the original bv_array
+  for (uint32_t i = 0; i < w; i++) {
+
+    term_t t_i = ebits[i]; // The Boolean term that constitutes that bit
+
+    if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+      FILE* out = ctx_trace_out(ctx);
+      fprintf(out, "bit %d is ",i);
+      term_print_to_file(out, terms, t_i);
+      fprintf(out, "\n");
+    }
+
+    // Then we normalise the bit t_i
+    if (term_kind(terms, t_i) == BIT_TERM) {
+      uint32_t index = bit_term_index(terms, t_i); // Get selected bit
+      term_t base    = bit_term_arg(terms, t_i);   // Get the base
+      assert(term_kind(terms, base) != BV_ARRAY);
+      bool isneg     = is_neg_term(t_i);
+      uint32_t key_index = fix_htbl_index(preproc[0],w,base);
+      base = (index < preproc[2][key_index]) ?
+        preproc[3][key_index] :
+        preproc[1][key_index] ;
+      ebits[i] = bv_bitterm(terms, mk_bitextract(tm, base, index));
+      if (isneg) ebits[i] = not_term(terms, ebits[i]); // Same polarity as the original t_i
+    } else {
+      ebits[i] = arith_normalise_upto(norm, t_i, 1);
+    }
+  }
+
+}
+
+
+// Extracting the w lowest bits of t, normalising on the way
 term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
 
   // standard abbreviations
@@ -764,92 +857,8 @@ term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
   }
 
   case BV_ARRAY: {  // Concatenated boolean terms
-    composite_term_t* concat_desc = bvarray_term_desc(terms, t);
     term_t ebits[w]; // Where we build the result
-
-    // First, we eliminate BIT_TERM-over-BV_ARRAYs:
-    for (uint32_t i = 0; i < w; i++)
-      ebits[i] = bv_bitterm(terms, concat_desc->arg[i]);
-    
-    // Hand-made hash map (we want it light, non-redimensionable,
-    // and we can do so because we know the max size is w).
-    // In each cell i, there are 4 integers:
-    // preproc[0][i] is the key, which is a term_t, let's call it k
-    // preproc[1][i] is the maximum i such that k[i] is a bit of this bv_array, let's call it top; then:
-    // preproc[1][i] is the term_t arith_normalise_upto(k,top+1) (normalised version of k over the lowest top+1 bits), let's call it norm
-    // preproc[2][i] is the value returned by bv_evaluator_not_free_up_to(norm), let's call it maxeval
-    // preproc[3][i] is the term_t arith_normalise_upto(norm,maxeval), if maxeval is not 0
-    term_t preproc[4][w];
-    // We initialise the hashmap
-    fix_htbl_init(preproc[0], w);
-      
-    // Now we range over the bits of the t bv_array of the form base[index], and we fill-in preproc[0][*] and preproc[1][*]
-    for (uint32_t i = 0; i < w; i++) {
-      term_t t_i = ebits[i];        // The Boolean term that constitutes bit i of t
-      if (term_kind(terms, t_i) == BIT_TERM) { // Is it of the form base[index] ?
-        uint32_t index = bit_term_index(terms, t_i);  // Get selected bit
-        term_t base    = bit_term_arg(terms, t_i);    // Get the base
-        assert(term_kind(terms, base) != BV_ARRAY);
-        uint32_t key_index = fix_htbl_index(preproc[0],w,base);
-        if (preproc[0][key_index] == NULL_TERM
-            || preproc[1][key_index] < index)
-          preproc[1][key_index] = index;
-        if (preproc[0][key_index] == NULL_TERM)
-          preproc[0][key_index] = base;
-      }
-    }
-
-    // Now we fill-in preproc[1][*], preproc[2][*], preproc[3][*], normalising recursively
-    for (uint32_t i = 0; i < w; i++) {
-      if (preproc[0][i] != NULL_TERM) {
-        uint32_t size = preproc[1][i] + 1;
-        preproc[1][i] = arith_normalise_upto(norm, preproc[0][i], size);
-        preproc[2][i] = bv_evaluator_not_free_up_to(&norm->csttrail, preproc[1][i]);
-        if (preproc[2][i] > size)
-          preproc[2][i] = size;
-        if (preproc[2][i] > 0) {
-          preproc[3][i] = (preproc[2][i] == size) ?
-            preproc[1][i] :
-            arith_normalise_upto(norm, preproc[1][i], preproc[2][i]);
-        }
-      }
-    }
-
-    if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
-      FILE* out = ctx_trace_out(ctx);
-      fprintf(out, "Finished filling-in preproc with recursive normalisation, now going through the bits in order.\n");
-    }
-
-    // Now we range over the bits of the original bv_array
-    for (uint32_t i = 0; i < w; i++) {
-
-      term_t t_i = ebits[i]; // The Boolean term that constitutes that bit
-
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "bit %d is ",i);
-        term_print_to_file(out, terms, t_i);
-        fprintf(out, "\n");
-      }
-
-      // Then we normalise the bit t_i
-      if (term_kind(terms, t_i) == BIT_TERM) {
-        uint32_t index = bit_term_index(terms, t_i); // Get selected bit
-        term_t base    = bit_term_arg(terms, t_i);   // Get the base
-        assert(term_kind(terms, base) != BV_ARRAY);
-        bool isneg     = is_neg_term(t_i);
-        uint32_t key_index = fix_htbl_index(preproc[0],w,base);
-        base = (index < preproc[2][key_index]) ?
-          preproc[3][key_index] :
-          preproc[1][key_index] ;
-        ebits[i] = bv_bitterm(terms, mk_bitextract(tm, base, index));
-        if (isneg) ebits[i] = not_term(terms, ebits[i]); // Same polarity as the original t_i
-      } else {
-        ebits[i] = arith_normalise_upto(norm, t_i, 1);
-      }
-    }
-    /* term_t tmp = mk_bvarray(tm, w, ebits); */
-    /* arith_analyse_t analysis = arith_analyse(norm, tmp); */
+    arith_normalise_bvarray(norm, t, w, ebits);
     arith_analyse_t analysis;
     init_analysis(&analysis);
     analyse_bvarray(norm, w, ebits, &analysis);
