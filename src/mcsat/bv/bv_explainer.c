@@ -157,20 +157,6 @@ void bv_explainer_normalize_conflict(bv_explainer_t* exp, ivector_t* conflict_ou
   ivector_reset(&exp->tmp_conflict_vec);
 }
 
-void bv_explainer_check_conflict(bv_explainer_t* exp, const ivector_t* conflict) {
-  ctx_config_t* config = yices_new_config();
-  context_t* ctx = yices_new_context(config);
-  uint32_t i;
-  for (i = 0; i < conflict->size; ++ i) {
-    yices_assert_formula(ctx, conflict->data[i]);
-  }
-  smt_status_t result = yices_check_context(ctx, NULL);
-  (void) result;
-  assert(result == STATUS_UNSAT);
-  yices_free_context(ctx);
-  yices_free_config(config);
-}
-
 void print_counters(bv_explainer_t* exp){
   FILE* out = ctx_trace_out(exp->ctx);
   bv_subexplainer_t* subexplainer = NULL;
@@ -181,6 +167,28 @@ void print_counters(bv_explainer_t* exp){
             (*subexplainer->stat_explain_conflict_calls),
             (*subexplainer->stat_explain_propagation_calls));
   }
+}
+
+void bv_explainer_check_conflict(bv_explainer_t* exp, const ivector_t* conflict) {
+  ctx_config_t* config = yices_new_config();
+  context_t* yctx = yices_new_context(config);
+  uint32_t i;
+  for (i = 0; i < conflict->size; ++ i) {
+    yices_assert_formula(yctx, conflict->data[i]);
+  }
+  smt_status_t result = yices_check_context(yctx, NULL);
+  (void) result;
+  if (result != STATUS_UNSAT) {
+    FILE* out = ctx_trace_out(exp->ctx);
+    fprintf(out, "Invalid lemma!\n");
+    for (i = 0; i < conflict->size; i++) {
+      fprintf(out,"[%"PRId32"]",i);
+      ctx_trace_term(exp->ctx, conflict->data[i]);
+    }
+  }
+  assert(result == STATUS_UNSAT);
+  yices_free_context(yctx);
+  yices_free_config(config);
 }
 
 void bv_explainer_get_conflict(bv_explainer_t* exp, const ivector_t* conflict_in, variable_t conflict_var, ivector_t* conflict_out) {

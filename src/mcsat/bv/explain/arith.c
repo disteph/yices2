@@ -382,7 +382,7 @@ void bv_arith_init_side(arith_t* exp, term_t polyrest, bvconstant_t* cc) {
 }
 
 
-// Treat a constraint of the form lhs <= rhs
+// Treat a constraint of the form (lhs <= rhs) being true or false as indicated by b
 interval_t* bv_arith_unit_le(arith_t* exp, term_t lhs, term_t rhs, bool b) {
   // Standard abbreviations
   plugin_context_t* ctx = exp->super.ctx;
@@ -401,7 +401,7 @@ interval_t* bv_arith_unit_le(arith_t* exp, term_t lhs, term_t rhs, bool b) {
     fprintf(out, "\n");
   }
 
-  // Not sure that it holds; can fail for stupid reasons
+  // Not sure that the following holds; can fail for stupid reasons
   /* assert(arith_normalise(&exp->norm, lhs) == lhs); */
   /* assert(arith_normalise(&exp->norm, rhs) == rhs); */
     
@@ -540,13 +540,13 @@ interval_t* bv_arith_unit_le(arith_t* exp, term_t lhs, term_t rhs, bool b) {
     } else { // x appears on neither sides
       if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
         FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "Case <=: !has_right, !has_left");
+        fprintf(out, "Case <=: !has_right, !has_left\n");
       }
-      if (b && bvconstant_lt(&cc2,&cc1)) { // If c2 < c1, we forbid everything, otherwise we forbid nothing
+      if (b && bvconstant_lt(&cc2,&cc1)) {
         term_t reason = arith_lt_norm(&exp->norm, c2, c1);
         result = interval_full_mk(&exp->super, reason, w);
       }
-      if (!b && bvconstant_le(&cc1,&cc2)) { // If c2 < c1, we forbid everything, otherwise we forbid nothing
+      if (!b && bvconstant_le(&cc1,&cc2)) {
         term_t reason = arith_le_norm(&exp->norm, c1, c2);
         result = interval_full_mk(&exp->super, reason, w);
       }
@@ -1084,10 +1084,9 @@ void transform_interval(arith_t* exp, interval_t** interval) {
     // or the top pruning has been pushed further inside the base
 
     bool is_empty = interval_uptrim(&exp->super, &exp->norm, ts->suffix+ts->length, interval[0]);
-    (void) is_empty; // Otherwise compilation warning
-    assert(!is_empty);
+    if (is_empty) { interval[0] = NULL; return; }
     is_empty = interval_downtrim(&exp->super, &exp->norm, ts->suffix, interval[0]);
-    assert(!is_empty);
+    if (is_empty) { interval[0] = NULL; return; }
     interval_downextend(&exp->super, ts->start, interval[0]);
 
     switch (term_kind(terms, ts->base)) {
@@ -1229,7 +1228,7 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in) {
       // We range over the w bits, looking at both sides
       // A bit (index) j is "bad" if both sides are unevaluable, is "good" otherwise
 
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith::reduce")) {
         FILE* out = ctx_trace_out(ctx);
         fprintf(out, "\nbv_arith reduces core constraint (%s): ",atom_i_value?"T":"F");
         ctx_trace_term(ctx, atom_i_term);
@@ -1241,7 +1240,7 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in) {
 
       for (uint32_t j = 0; j < w; ) {
 
-        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::reduce")) {
           FILE* out = ctx_trace_out(ctx);
           fprintf(out, "\nbit %d\n",j);
           ctx_trace_term(ctx, b0[j]);
@@ -1249,7 +1248,7 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in) {
         }
 
         if (uneval0 && uneval1) { // Bit j is unevaluable on both sides: bit is BAD
-          if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith::reduce")) {
             FILE* out = ctx_trace_out(ctx);
             fprintf(out, "BAD (%s,%s)\n",uneval0?"uneval":"eval",uneval1?"uneval":"eval");
           }
@@ -1277,7 +1276,7 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in) {
             }
           }
         } else {
-          if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith::reduce")) {
             FILE* out = ctx_trace_out(ctx);
             fprintf(out, "GOOD (%s,%s)\n",uneval0?"uneval":"eval",uneval1?"uneval":"eval");
           }
@@ -1340,7 +1339,7 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in) {
        current != NULL;
        current = ptr_hmap_next_record(&exp->term_constraints, current)) {
     term_t t = current->key;
-    if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+    if (ctx_trace_enabled(ctx, "mcsat::bv::arith::reduce")) {
       FILE* out = ctx_trace_out(ctx);
       fprintf(out, "Constraint for uneval term ");
       ctx_trace_term(ctx, t);
@@ -1351,14 +1350,14 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in) {
     uint32_t section_start = 0;
     for (uint32_t j = 0; j < w; ) {
       if (tbits[j] == NULL_TERM) {
-        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::reduce")) {
           FILE* out = ctx_trace_out(ctx);
           fprintf(out, "NULL\n");
         }
         j++;
         section_start = j;
       } else {
-        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
+        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::reduce")) {
           FILE* out = ctx_trace_out(ctx);
           fprintf(out, "bit %d must be\n",j);
           ctx_trace_term(ctx, tbits[j]);
@@ -1369,9 +1368,14 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in) {
           uint32_t length = j - section_start;
           term_t left  = term_extract(tm, t, section_start, j);
           term_t right = mk_bvarray(tm, length, tbits + section_start);
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith::reduce")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "LHS (extracting between %d and %d) is ", section_start, j);
+            ctx_trace_term(ctx, term_extract(tm, t, 0, j));
+            ctx_trace_term(ctx, left);
+          }
           assert(is_bitvector_term(tm->terms, left));
           assert(is_bitvector_term(tm->terms, right));
-          assert(!bv_evaluator_is_evaluable(csttrail, left));
           assert(bv_evaluator_is_evaluable(csttrail, right));
           add_constraint(exp, mk_eq(tm,left,right), true);
         }
@@ -1379,7 +1383,36 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in) {
     }
     safe_free((term_t*) current->val);
   }
-  
+
+  if (ctx_trace_enabled(ctx, "mcsat::bv::rewrite::check")) {
+
+    term_t in_terms[n];
+    for (uint32_t i = 0; i < n; i++) {
+      atom_i_var   = reasons_in->data[i];
+      atom_i_value = trail_get_boolean_value(trail, atom_i_var);
+      atom_i_term  = variable_db_get_term(ctx->var_db, atom_i_var);
+      in_terms[i] = atom_i_value ? atom_i_term : not_term(terms,atom_i_term);
+    }
+
+    uint32_t out_n = exp->conflict_t.size;
+    term_t out_terms[out_n];
+    for (uint32_t i = 0; i < out_n; i++) {
+      out_terms[i] = exp->conflict_v.data[i] ?
+        exp->conflict_t.data[i] :
+        not_term(terms,exp->conflict_t.data[i]);
+    }
+    
+    term_t in_term  = mk_and(tm, n, in_terms);
+    term_t out_term = mk_and(tm, out_n, out_terms);
+    if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+      FILE* out = ctx_trace_out(ctx);
+      fprintf(out, "In_conflict ");
+      ctx_trace_term(ctx, in_term);
+      fprintf(out, " is rewritten to ");
+      ctx_trace_term(ctx, out_term);
+    }
+    assert(check_rewrite(ctx, in_term, out_term));
+  }
 }
 
 static
@@ -1482,16 +1515,15 @@ void bvarith_explain(bv_subexplainer_t* this,
       FILE* out = ctx_trace_out(ctx);
       fprintf(out, "explain: created one interval, let's see if it needs transforming\n");
     }
-    if (intervals[i] != NULL) {
+    if (intervals[i] != NULL)
       transform_interval(exp, &intervals[i]);
-    }
   }
 
   if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
     FILE* out = ctx_trace_out(ctx);
     fprintf(out, "\nFinished creating the intervals. Here they are before they are sorted:\n");
     for (uint32_t i = 0; i < n; i++) {
-      fprintf(out, "Scanning interval ");
+      fprintf(out, "Interval %d is",i);
       if (intervals[i] == NULL) {
         fprintf(out, "EMPTY");
       } else {
@@ -1562,7 +1594,7 @@ void bvarith_explain(bv_subexplainer_t* this,
   }
 
   /* All atoms in reasons_in have been treated, the resulting forbidden intervals for the
-     var have been pushed in the heap. It's now time to look at what's in the heap. */
+     var have been collected. It's now time to look at how the cover the domain of feasible values. */
 
   ivector_t cover_output; // where the call to cover should place literals
   init_ivector(&cover_output, 0);

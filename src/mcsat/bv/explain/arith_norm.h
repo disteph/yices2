@@ -128,7 +128,7 @@ term_t arith_eq_norm(arith_norm_t* norm, term_t left, term_t right){
   term_t r = arith_normalise(norm, right);
   term_t t = arith_sub(tm, r, l);
   t = arith_normalise(norm, t);
-  return arith_eq0(tm, t);
+  return arith_eq0_raw(tm, t);
 }
 
 // This function returns (left < right), normalising left and right and simplifying the result
@@ -137,7 +137,7 @@ term_t arith_lt_norm(arith_norm_t* norm, term_t left, term_t right){
   term_manager_t* tm = norm->csttrail.ctx->tm;
   term_t leftn  = arith_normalise(norm, left);
   term_t rightn = arith_normalise(norm, right);
-  return arith_lt(tm, leftn, rightn);
+  return arith_lt_raw(tm, leftn, rightn);
 }
 
 // This function returns (left < right), normalising left and right and simplifying the result
@@ -146,6 +146,6 @@ term_t arith_le_norm(arith_norm_t* norm, term_t left, term_t right){
   term_manager_t* tm = norm->csttrail.ctx->tm;
   term_t leftn  = arith_normalise(norm, left);
   term_t rightn = arith_normalise(norm, right);
-  return arith_le(tm, leftn, rightn);
+  return arith_le_raw(tm, leftn, rightn);
 }
 
