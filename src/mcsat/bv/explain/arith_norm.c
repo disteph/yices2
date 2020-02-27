@@ -441,6 +441,52 @@ arith_analyse_t* arith_analyse(arith_norm_t* norm, term_t t){
   
 }
 
+// Computes a hash of the triple (term, conflict_variable, number of bits)
+static inline
+uint32_t norm_hash(term_t t, term_t v, uint32_t n){
+  uint32_t t_hash = jenkins_hash_int32(t);
+  uint32_t v_hash = jenkins_hash_int32(v);
+  uint32_t n_hash = jenkins_hash_uint32(n);
+  return jenkins_hash_mix3(t_hash, v_hash, n_hash);
+}
+
+
+static inline
+void norm_cache_add(arith_norm_t* norm, term_t t, term_t conflict_var, uint32_t bits, term_t result){
+  assert(t != NULL_TERM);
+  bool is_eval = (bv_evaluator_not_free_up_to(&norm->csttrail, t) >= bits);
+  term_t v     = is_eval ? 0 : conflict_var;
+  uint32_t i   = norm_hash(t, v, bits) % norm->norm_cache_size;
+  arith_norm_entry_t* e = &norm->norm_cache[i];
+  e->term = t;
+  e->conflict_variable = v;
+  e->bits = bits;
+  e->norm = result;
+}
+
+static inline
+term_t norm_cache_find(arith_norm_t* norm, term_t t, term_t conflict_var, uint32_t bits){
+  assert(t != NULL_TERM);
+  bv_csttrail_t* csttrail = &norm->csttrail;
+  plugin_context_t* ctx = csttrail->ctx;
+  bool is_eval = (bv_evaluator_not_free_up_to(&norm->csttrail, t) >= bits);
+  term_t v     = is_eval ? 0 : conflict_var;
+  uint32_t i   = norm_hash(t, v, bits) % norm->norm_cache_size;
+  arith_norm_entry_t* e = &norm->norm_cache[i];
+  if (e->term == t
+      && e->conflict_variable == v
+      && e->bits == bits){
+    return e->norm;
+  }
+  else {
+    if (e->term != NULL_TERM
+        && ctx_trace_enabled(ctx, "mcsat::bv::arith::scan:cache")) {
+      FILE* out = ctx_trace_out(ctx);
+      fprintf(out, "Norm_cache collision\n");
+    }
+    return NULL_TERM;
+  }
+}
 
 #ifndef NDEBUG
 
@@ -545,7 +591,7 @@ term_t finalise(arith_norm_t* norm, term_t original, arith_analyse_t* s){
     fprintf(out, "\n");
   }
   // We know what we are returning, now we just cache it for later
-  int_hmap2_add(&norm->norm_cache, original, w, result);
+  norm_cache_add(norm, original, csttrail->conflict_var_term, w, result);
   return check_and_return(norm, original, w, result);  
 }
 
@@ -642,14 +688,15 @@ term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
   }
 
   // We first look at whether the value is cached
-  int_hmap2_rec_t* t_norm = int_hmap2_find(&norm->norm_cache, t, w);
-  if (t_norm != NULL) {
+  
+  term_t t_norm = norm_cache_find(norm, t, csttrail->conflict_var_term, w);
+  if (t_norm != NULL_TERM) {
     if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
       FILE* out = ctx_trace_out(ctx);
       fprintf(out, "Found in the memoisation table! It's ");
-      ctx_trace_term(ctx, t_norm->val);
+      ctx_trace_term(ctx, t_norm);
     }
-    return t_norm->val;
+    return t_norm;
   }
 
   if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
@@ -683,7 +730,7 @@ term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
     term_t tmp = mk_bv_composite(tm, t_kind, n, norms);
     if (is_boolean_term(terms,t)) {
       assert(w == 1);
-      int_hmap2_add(&norm->norm_cache, t, w, tmp);
+      norm_cache_add(norm, t, csttrail->conflict_var_term, w, tmp);
       return check_and_return(norm, t, w, tmp);  
     } else {
       // tmp is not necessarily w-bit normalised (w was not involved); so we do a new pass
@@ -714,7 +761,7 @@ term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
     base           = arith_normalise_upto(norm, base, index+1);
     term_t result  = bv_bitterm(terms, mk_bitextract(tm, base, index));
     // Here, result is 1-bit normalised
-    int_hmap2_add(&norm->norm_cache, t, w, result);
+    norm_cache_add(norm, t, csttrail->conflict_var_term, w, result);
     return check_and_return(norm, t, w, result);
   }
 
@@ -856,7 +903,8 @@ term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
     return finalise(norm, t, &analysis);
   }
 
-  default: { // Happens for instance with pprods
+  default: {
+    assert(false);
     assert(!is_boolean_term(terms,t));
     term_t tmp = term_extract(tm, t, 0, w);
     arith_analyse_t* analysis = arith_analyse(norm, tmp);
