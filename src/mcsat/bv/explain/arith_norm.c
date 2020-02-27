@@ -14,18 +14,6 @@
 #include "mcsat/bv/bv_utils.h"
 #include "arith_norm.h"
 
-// var_cache hash map has dynamically allocated values
-// So before resetting or deleting it, one must free the memory of the stored values
-// which the following function does
-
-void arith_norm_freeval(arith_norm_t* norm) {
-  for (pmap_rec_t* current = pmap_first_record(&norm->var_cache);
-       current != NULL;
-       current = pmap_next_record(&norm->var_cache, current)) {
-    safe_free((arith_analyse_t*) current->val);
-  }
-}
-
 void init_analysis(arith_analyse_t* result){
   result->suffix  = 0;
   result->length  = 0;
