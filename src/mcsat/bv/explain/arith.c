@@ -1430,8 +1430,8 @@ void bvarith_explain(bv_subexplainer_t* this,
   bv_evaluator_clear_cache(eval);
 
   // Standard abbreviations
-  term_table_t* terms        = ctx->terms;
-  term_manager_t* tm         = ctx->tm;
+  term_table_t* terms = ctx->terms;
+  term_manager_t* tm  = ctx->tm;
   assert(exp->norm.csttrail.conflict_var == var); 
 
   // Variables that are going to be re-used for every item in reasons_in
@@ -1468,6 +1468,14 @@ void bvarith_explain(bv_subexplainer_t* this,
       ctx_trace_term(ctx, atom_i_term);
     }
 
+    if (atom_i_term == true_term) {
+      if (atom_i_value) {
+        intervals[i] = NULL;
+        continue;
+      }
+      else return;
+    }
+    
     term_t t0prime = NULL_TERM;
     term_t t1prime = NULL_TERM;
 
@@ -1665,7 +1673,6 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
     // Atom and its term
     term_t atom_term  = exp->conflict_t.data[i];
 
-
     if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
       FILE* out = ctx_trace_out(ctx);
       fprintf(out, "bv_arith looks at whether constraint %"PRId32" is in the fragment: ",i);
@@ -1675,6 +1682,9 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
     }
 
     assert(is_pos_term(atom_term));
+    if (atom_term == true_term) {
+      continue;
+    }
 
     switch (term_kind(terms, atom_term)) {
     case EQ_TERM : 
@@ -1789,6 +1799,7 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
       break;
     }
     }
+    if (!result) return false;
   }
   return result;
 }
