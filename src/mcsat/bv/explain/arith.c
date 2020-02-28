@@ -1531,7 +1531,7 @@ void bvarith_explain(bv_subexplainer_t* this,
     FILE* out = ctx_trace_out(ctx);
     fprintf(out, "\nFinished creating the intervals. Here they are before they are sorted:\n");
     for (uint32_t i = 0; i < n; i++) {
-      fprintf(out, "Interval %d is",i);
+      fprintf(out, "Interval %d is ",i);
       if (intervals[i] == NULL) {
         fprintf(out, "EMPTY");
       } else {
@@ -1546,7 +1546,7 @@ void bvarith_explain(bv_subexplainer_t* this,
   assert(intervals[0] != NULL); // There should be at least one non-empty interval
   if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
     FILE* out = ctx_trace_out(ctx);
-    fprintf(out, "Looking at interval ");
+    fprintf(out, "Interval 0 is now ");
     interval_print(out, ctx->terms, intervals[0]);
     fprintf(out, "\n");
   }
@@ -1555,7 +1555,7 @@ void bvarith_explain(bv_subexplainer_t* this,
   for (; (nonemptys < n) && (intervals[nonemptys] != NULL); nonemptys++) {
     if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
       FILE* out = ctx_trace_out(ctx);
-      fprintf(out, "Looking at interval ");
+      fprintf(out, "Interval %d is now ",i);
       interval_print(out, ctx->terms, intervals[nonemptys]);
       fprintf(out, "\n");
     }
