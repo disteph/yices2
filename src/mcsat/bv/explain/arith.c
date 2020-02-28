@@ -1555,7 +1555,7 @@ void bvarith_explain(bv_subexplainer_t* this,
   for (; (nonemptys < n) && (intervals[nonemptys] != NULL); nonemptys++) {
     if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
       FILE* out = ctx_trace_out(ctx);
-      fprintf(out, "Interval %d is now ",i);
+      fprintf(out, "Interval %d is now ",nonemptys);
       interval_print(out, ctx->terms, intervals[nonemptys]);
       fprintf(out, "\n");
     }
