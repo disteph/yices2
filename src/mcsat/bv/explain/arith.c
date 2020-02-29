@@ -741,7 +741,7 @@ bool cover(arith_t* exp,
 
   // First interval in the virtual array is always the longest.
   // It is the first one we consider in the upcoming loop.
-  assert(longest == get_interval(intervals[0],inherited,inherited_index,0));
+  assert(bvconstant_eq(&longest->length, &get_interval(intervals[0],inherited,inherited_index,0)->length));
 
   // The elements saved in output so far forbid conflict_var[w] to be in [first->lo; saved_hi[
   interval_t* first = NULL;
