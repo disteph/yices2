@@ -87,7 +87,7 @@ term_t interval_is_in_term(arith_norm_t* norm, term_t t, const interval_t* i){
   return result;
 }
 
-// Comparing two intervals: first look at bitwidth, then lower bound, then span.
+// Comparing two intervals: first look at bitwidth, then lower bound, then span, then loterm, then hi_term.
 // When lower bounds are compared, an optional baseline can be provided, in data,
 // which must have the same bitwidth as x and y.
 bool interval_cmp(void *data, void *x, void *y){
@@ -97,8 +97,15 @@ bool interval_cmp(void *data, void *x, void *y){
   if (x == NULL) return false; // NULL is not smaller than anyone (strict order)
   if (y == NULL) return true;  // NULL is strictly bigger than anyone but NULL
   if (interval_get_bitwidth(i1) == interval_get_bitwidth(i2)) {
-    if (bvconstant_eq(&i1->lo,&i2->lo))
+    if (bvconstant_eq(&i1->lo,&i2->lo)) {
+      if (bvconstant_eq(&i1->hi,&i2->hi)) {
+        if (i1->lo_term == i2->lo_term) {
+          return i1->hi_term < i2->hi_term;
+        }
+        return i1->lo_term < i2->lo_term;
+      }
       return bvconst_lt_base(&i2->hi,&i1->hi,&i1->lo);
+    }
     return (baseline==NULL) ?
       bvconstant_lt(&i1->lo,&i2->lo) :
       bvconst_lt_base(&i1->lo,&i2->lo,baseline) ;

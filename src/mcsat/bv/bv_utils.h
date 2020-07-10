@@ -425,18 +425,19 @@ static inline
 bool check_rewrite(plugin_context_t* ctx, term_t old, term_t t){
   if (t == old) return true;
   term_manager_t* tm   = ctx->tm;
+  term_t assertion     = mk_neq(tm, old, t);
   ctx_config_t* config = yices_new_config();
   context_t* yctx      = yices_new_context(config);
-  yices_assert_formula(yctx, mk_neq(tm, old, t));
+  yices_assert_formula(yctx, assertion);
   smt_status_t output = yices_check_context(yctx, NULL);
   bool result = (output == STATUS_UNSAT);
-  if (!result && ctx_trace_enabled(ctx, "mcsat::bv::arith::ctz")) {
+  if (!result) {
     FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "Checking rewrite\n");
     fprintf(out, "Original term is");
     ctx_trace_term(ctx, old);
     fprintf(out, "New term is");
     ctx_trace_term(ctx, t);
-    assert(false);
   }
   yices_free_context(yctx);
   yices_free_config(config);

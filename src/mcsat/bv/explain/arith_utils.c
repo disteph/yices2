@@ -198,7 +198,7 @@ term_t arith_downextension(term_manager_t* tm, term_t t, term_t b, uint32_t w) {
 **/
 
 // This function returns (u == 0), simplifying the result
-term_t arith_eq0(term_manager_t* tm, term_t t) {
+term_t arith_eq0_raw(term_manager_t* tm, term_t t) {
   term_table_t* terms = tm->terms;
   assert(arith_is_sum_norm(terms,t));
 
@@ -281,7 +281,7 @@ term_t arith_eq0(term_manager_t* tm, term_t t) {
 }
 
 // This function returns (left < right), simplifying the result
-term_t arith_lt(term_manager_t* tm, term_t left, term_t right) {
+term_t arith_lt_raw(term_manager_t* tm, term_t left, term_t right) {
   term_table_t* terms   = tm->terms;
   assert(term_bitsize(terms, left) == term_bitsize(terms, right));
   assert(arith_is_sum_norm(terms,left));
@@ -292,21 +292,21 @@ term_t arith_lt(term_manager_t* tm, term_t left, term_t right) {
     return false_term;
   // (left < 1) turns into (left == 0)
   if (arith_is_one(terms, right)) {
-    return arith_eq0(tm, left);
+    return arith_eq0_raw(tm, left);
   }
   // (left < -1) turns into (left+1 != 0)
   if (arith_is_minus_one(terms, right)) {
-    return not_term(terms, arith_eq0(tm, arith_sub(tm, left, right)));
+    return not_term(terms, arith_eq0_raw(tm, arith_sub(tm, left, right)));
   }
   // (0 < right) turns into (right != 0)
   if (arith_is_zero(terms, left)) {
-    return not_term(terms, arith_eq0(tm, right));
+    return not_term(terms, arith_eq0_raw(tm, right));
   }
   return mk_bvlt(tm, left, right);
 }
 
 // This function returns (left <= right), simplifying the result
-term_t arith_le(term_manager_t* tm, term_t left, term_t right) {
+term_t arith_le_raw(term_manager_t* tm, term_t left, term_t right) {
   term_table_t* terms   = tm->terms;
   assert(term_bitsize(terms, left) == term_bitsize(terms, right));
   assert(arith_is_sum_norm(terms,left));
@@ -319,12 +319,13 @@ term_t arith_le(term_manager_t* tm, term_t left, term_t right) {
     return true_term;
   }
   // (left <= 0) and (-1 <= right) turns into (left == right)
-  if (arith_is_zero(terms, right)) {
-    return arith_eq0(tm, left);
+  if (arith_is_zero(terms, right)
+      || arith_is_minus_one(terms, left)) {
+    return arith_eq0_raw(tm, arith_sub(tm, left, right));
   }
   // (1 <= right) turns into (right != 0)
   if (arith_is_one(terms, left)) {
-    return not_term(terms, arith_eq0(tm, right));
+    return not_term(terms, arith_eq0_raw(tm, right));
   }
   return mk_bvle(tm, left, right);
 }
