@@ -87,7 +87,7 @@ extern void context_pop(context_t *ctx);
 /*
  * Options for the simplex solver. If the context already contains
  * a simplex solver, then these options are set in this solver.
- * Otherwise,, they will be set at the time the simplex solver is 
+ * Otherwise, they will be set at the time the simplex solver is
  * constructed and added to the simplex solver.
  */
 extern void enable_splx_eager_lemmas(context_t *ctx);
@@ -194,6 +194,22 @@ extern smt_status_t check_context(context_t *ctx, const param_t *parameters);
  */
 extern smt_status_t check_context_with_assumptions(context_t *ctx, const param_t *parameters, uint32_t n, const literal_t *a);
 
+/*
+ * Check satisfiability under model: check whether the assertions stored in ctx
+ * conjoined with the assignment that the model gives to t is satisfiable.
+ *
+ * - params is an optional structure to store heuristic parameters
+ * - if params is NULL, default parameter settings are used.
+ * - model = model to assume
+ * - t = variables to use from the model (size = n)
+ *
+ * return status: either STATUS_UNSAT, STATUS_SAT, STATUS_UNKNOWN,
+ * STATUS_INTERRUPTED
+ *
+ * If status is STATUS_UNSAT then the context and model are inconsistent
+ */
+extern smt_status_t check_context_with_model(context_t *ctx, const param_t *params, model_t* mdl, uint32_t n, const term_t t[]);
+
 
 /*
  * Build a model: the context's status must be STATUS_SAT or STATUS_UNKNOWN
@@ -205,6 +221,20 @@ extern smt_status_t check_context_with_assumptions(context_t *ctx, const param_t
  */
 extern void context_build_model(model_t *model, context_t *ctx);
 
+/*
+ * Build a model for the current context (including all satellite solvers)
+ * - the context status must be SAT (or UNKNOWN)
+ * - if model->has_alias is true, we store the term substitution
+ *   defined by ctx->intern_tbl into the model
+ * - cleanup of satellite models needed using clean_solver_models()
+ */
+extern void build_model(model_t *model, context_t *ctx);
+
+/*
+ * Cleanup solver models
+ */
+extern void clean_solver_models(context_t *ctx);
+
 
 /*
  * Build an unsat core: the context's status must be STATUS_UNSAT
@@ -215,6 +245,11 @@ extern void context_build_model(model_t *model, context_t *ctx);
  */
 extern void context_build_unsat_core(context_t *ctx, ivector_t *v);
 
+
+/*
+ * Get the model interpolant: the context's status must be STATUS_USAT
+ */
+extern term_t context_get_unsat_model_interpolant(context_t *ctx);
 
 /*
  * Interrupt the search
@@ -302,6 +337,46 @@ extern smt_status_t check_with_delegate(context_t *ctx, const char *sat_solver, 
 
 
 /*
+ * Bit-blast then export to DIMACS
+ * - filename = name of the output file
+ * - status = status of the context after bit-blasting
+ *
+ * If ctx status is IDLE
+ * - perform one round of propagation to conver the problem to CNF
+ * - export the CNF to DIMACS
+ *
+ * If ctx status is not IDLE,
+ * - store the stauts in *status and do nothing else
+ *
+ * Return code:
+ *  1 if the DIMACS file was created
+ *  0 if the problem was solved by the propagation round
+ * -1 if there was an error in creating or writing to the file.
+ */
+extern int32_t bitblast_then_export_to_dimacs(context_t *ctx, const char *filename, smt_status_t *status);
+
+/*
+ * Simplify then export to DIMACS
+ * - filename = name of the output file
+ * - status = status of the context after CNF conversion + preprocessing
+ *
+ * If ctx status is IDLE
+ * - perform one round of propagation to convert the problem to CNF
+ * - export the CNF to y2sat for extra preprocessing then export that to DIMACS
+ *
+ * If ctx status is not IDLE, the function stores it in *status
+ * If y2sat preprocessing solves the formula, return the status also in *status
+ *
+ * Return code:
+ *  1 if the DIMACS file was created
+ *  0 if the problems was solved by preprocessing (or if ctx status is not IDLE)
+ * -1 if there was an error creating or writing to the file.
+ */
+extern int32_t process_then_export_to_dimacs(context_t *ctx, const char *filename, smt_status_t *status);
+
+
+
+/*
  * FOR TESTING/DEBUGGING
  */
 
@@ -368,6 +443,7 @@ extern bval_t context_bool_term_value(context_t *ctx, term_t t);
  * next call to term_table_gc).
  */
 extern void context_gc_mark(context_t *ctx);
+
 
 
 #endif /* __CONTEXT_H */

@@ -31,7 +31,7 @@
 /*
  * Allocate and construct the solver.
  */
-mcsat_solver_t* mcsat_new(context_t* ctx);
+mcsat_solver_t* mcsat_new(const context_t* ctx);
 
 /*
  * Destruct the solver.
@@ -76,17 +76,37 @@ void mcsat_pop(mcsat_solver_t* mcsat);
 int32_t mcsat_assert_formulas(mcsat_solver_t *mcsat, uint32_t n, const term_t *f);
 
 /*
- * Solve asserted constraints.
+ * Solve asserted constraints module given model.
  *
  * @param params Heuristic parameters. If params is NULL, the default settings
  *               are used.
+ * @param mdl the model to use. If mdl is NULL, solve with no model
+ * @param mdl_filter part of the model to use. If mdl_filter is NULL, use the whole model.
  */
-void mcsat_solve(mcsat_solver_t* mcsat, const param_t *params);
+void mcsat_solve(mcsat_solver_t* mcsat, const param_t *params, model_t* mdl, uint32_t n, const term_t t[]);
 
 /*
  * Add the model to the yices model
  */
 void mcsat_build_model(mcsat_solver_t* mcsat, model_t* model);
+
+/*
+ * Get model interpolant.
+ */
+term_t mcsat_get_unsat_model_interpolant(mcsat_solver_t* mcsat);
+
+/*
+ * Interrupt the search
+ * - this can be called after check_context from a signal handler
+ * - this interrupts the current search
+ * - if clean_interrupt is enabled, calling context_cleanup will
+ *   restore the solver to a good state, equivalent to the state
+ *   before the call to check_context
+ * - otherwise, the solver is in a bad state from which new assertions
+ *   can't be processed. Cleanup is possible via pop (if push/pop is supported)
+ *   or reset.
+ */
+void mcsat_stop_search(mcsat_solver_t* mcsat);
 
 /*
  * Set the tracer for the solver.

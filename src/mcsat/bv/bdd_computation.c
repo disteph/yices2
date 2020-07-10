@@ -35,7 +35,6 @@ void bdds_swap(BDD** a, BDD** b, uint32_t n) {
   }
 }
 
-static inline
 void bdds_copy(BDD** out, BDD** a, uint32_t n) {
   for (uint32_t i = 0; i < n; ++ i) {
     assert(a[i] != NULL);
@@ -156,22 +155,25 @@ void bdds_print(CUDD* cudd, BDD** a, uint32_t n, FILE* out) {
   Cudd_DumpFactoredForm(cudd->cudd, n, a, NULL, NULL, out);
 }
 
+static void cudd_too_many_vars(void) {
+  fflush(stdout);
+  fprintf(stderr, "\nCUDD: too many BDD variables\n");
+  out_of_memory();
+}
+
 void bdds_mk_variable(CUDD* cudd, BDD** out, uint32_t n) {
   BDD* bdd_i = NULL;
   for (uint32_t i = 0; i < n; ++i) {
     bdd_i = Cudd_bddNewVar(cudd->cudd);
-    /*
-     * BD: bdd_i can be NULL here. There's a hard-coded limit on the
-     * number of variables in cudd (and that's 2^16 -1 on 32bit
-     * machines).
-     *
-     * We should check for this and die cleanly rather than seg fault.
-     */
-    out[n-i-1] = bdd_i;
+    if (bdd_i == NULL) {
+      cudd_too_many_vars();
+    }
     // We do increase the reference count so that we are uniform when dereferencing
     Cudd_Ref(bdd_i);
-  }
-  if (bdd_i) {
+    out[n-i-1] = bdd_i;
+  };
+
+  if (bdd_i != NULL) {
     // Max index: last allocated variable
     unsigned int needed_size = Cudd_NodeReadIndex(bdd_i) + 1;
     if (needed_size > cudd->tmp_alloc_size) {
@@ -486,6 +488,21 @@ void bdds_mk_bool_or(CUDD* cudd, BDD** out, const pvector_t* a) {
     BDD* tmp = out[0];
     BDD** child_i = (BDD**) a->data[i];
     out[0] = Cudd_bddOr(cudd->cudd, tmp, child_i[0]);
+    Cudd_Ref(out[0]);
+    Cudd_IterDerefBdd(cudd->cudd, tmp);
+  }
+}
+
+/** Make a Boolean xor: a[0] ^^ ... ^^ a[n] */
+static
+void bdds_mk_bool_xor(CUDD* cudd, BDD** out, const pvector_t* a) {
+  uint32_t n = a->size;
+  out[0] = Cudd_ReadLogicZero(cudd->cudd);
+  Cudd_Ref(out[0]);
+  for (uint32_t i = 0; i < n; i ++ ) {
+    BDD* tmp = out[0];
+    BDD** child_i = (BDD**) a->data[i];
+    out[0] = Cudd_bddXor(cudd->cudd, tmp, child_i[0]);
     Cudd_Ref(out[0]);
     Cudd_IterDerefBdd(cudd->cudd, tmp);
   }
@@ -1204,6 +1221,11 @@ void bdds_compute_bdds(CUDD* cudd, term_table_t* terms, term_t t,
     case OR_TERM: {
       assert(children_bdds->size == or_term_desc(terms, t)->arity);
       bdds_mk_bool_or(cudd, out_bdds, children_bdds);
+      break;
+    }
+    case XOR_TERM: {
+      assert(children_bdds->size == xor_term_desc(terms, t)->arity);
+      bdds_mk_bool_xor(cudd, out_bdds, children_bdds);
       break;
     }
     case EQ_TERM: // Boolean equality

@@ -1339,6 +1339,7 @@ static bool check_duplicate_string(tagged_string_t *a, int32_t n, char *s) {
  * Check whether all names in a scalar-type definition are distinct
  * - names are in f[0] .. f[n-1]
  * - all are symbols
+ * - n is positive
  */
 static void check_distinct_scalar_names(tstack_t *stack, stack_elem_t *f, uint32_t n) {
   uint32_t i;
@@ -1358,16 +1359,21 @@ static void check_distinct_scalar_names(tstack_t *stack, stack_elem_t *f, uint32
  * Check whether all names in a list of variable bindings are distinct
  * - names are in f[0] .. f[n-1]
  * - all are bindings
+ *
+ * NOTE: the declaration check[n] causes the memory sanitizer to report a
+ * runtime error if n is 0.
  */
 void check_distinct_binding_names(tstack_t *stack, stack_elem_t *f, uint32_t n) {
-  uint32_t i;
-  tagged_string_t check[n];
+  if (n > 0) {
+    uint32_t i;
+    tagged_string_t check[n];
 
-  // check for duplicate strings in the sequence
-  for (i=0; i<n; i++) {
-    assert(f[i].tag == TAG_BINDING);
-    if (check_duplicate_string(check, i, f[i].val.binding.symbol)) {
-      raise_exception(stack, f+i, TSTACK_DUPLICATE_VAR_NAME);
+    // check for duplicate strings in the sequence
+    for (i=0; i<n; i++) {
+      assert(f[i].tag == TAG_BINDING);
+      if (check_duplicate_string(check, i, f[i].val.binding.symbol)) {
+	raise_exception(stack, f+i, TSTACK_DUPLICATE_VAR_NAME);
+      }
     }
   }
 }
@@ -1375,21 +1381,24 @@ void check_distinct_binding_names(tstack_t *stack, stack_elem_t *f, uint32_t n) 
 
 /*
  * Same thing for type-variable bindings
+ *
+ * NOTE: the declaration check[n] causes the memory sanitizer to report a
+ * runtime error if n is 0.
  */
 void check_distinct_type_binding_names(tstack_t *stack, stack_elem_t *f, uint32_t n) {
-  uint32_t i;
-  tagged_string_t check[n];
+  if (n > 0) {
+    uint32_t i;
+    tagged_string_t check[n];
 
-  // check for duplicate strings in the sequence
-  for (i=0; i<n; i++) {
-    assert(f[i].tag == TAG_TYPE_BINDING);
-    if (check_duplicate_string(check, i, f[i].val.type_binding.symbol)) {
-      raise_exception(stack, f+i, TSTACK_DUPLICATE_TYPE_VAR_NAME);
+    // check for duplicate strings in the sequence
+    for (i=0; i<n; i++) {
+      assert(f[i].tag == TAG_TYPE_BINDING);
+      if (check_duplicate_string(check, i, f[i].val.type_binding.symbol)) {
+	raise_exception(stack, f+i, TSTACK_DUPLICATE_TYPE_VAR_NAME);
+      }
     }
   }
 }
-
-
 
 
 /*
@@ -5802,6 +5811,11 @@ void delete_tstack(tstack_t *stack) {
   safe_free(stack->aux_buffer);
   stack->aux_buffer = NULL;
 
+  if (stack->sbuffer != NULL) {
+    safe_free(stack->sbuffer);
+    stack->sbuffer = NULL;
+  }
+
   delete_bvconstant(&stack->bvconst_buffer);
 
   if (stack->abuffer != NULL) {
@@ -5824,6 +5838,33 @@ void delete_tstack(tstack_t *stack) {
     stack->bvlbuffer = NULL;
   }
 }
+
+
+/*
+ * Reset all the internal buffers
+ */
+void tstack_reset_buffers(tstack_t *stack) {
+  if (stack->abuffer != NULL) {
+    yices_free_arith_buffer(stack->abuffer);
+    stack->abuffer = NULL;
+  }
+
+  if (stack->bva64buffer != NULL) {
+    yices_free_bvarith64_buffer(stack->bva64buffer);
+    stack->bva64buffer = NULL;
+  }
+
+  if (stack->bvabuffer != NULL) {
+    yices_free_bvarith_buffer(stack->bvabuffer);
+    stack->bvabuffer = NULL;
+  }
+
+  if (stack->bvlbuffer != NULL) {
+    yices_free_bvlogic_buffer(stack->bvlbuffer);
+    stack->bvlbuffer = NULL;
+  }
+}
+
 
 
 /*

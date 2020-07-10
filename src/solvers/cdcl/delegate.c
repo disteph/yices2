@@ -18,6 +18,7 @@
 
 #include <assert.h>
 #include <string.h>
+#include <stdio.h>
 
 #ifdef HAVE_CADICAL
 #include "ccadical.h"
@@ -25,6 +26,10 @@
 
 #ifdef HAVE_CRYPTOMINISAT
 #include "cryptominisat5/cmsat_c.h"
+#endif
+
+#ifdef HAVE_KISSAT
+#include "kissat.h"
 #endif
 
 #include "solvers/cdcl/delegate.h"
@@ -66,11 +71,25 @@ static void ysat_add_clause(void *solver, uint32_t n, literal_t *a) {
 }
 
 static smt_status_t ysat_check(void *solver) {
+  // use new sat solver
   switch (nsat_solve(solver)) {
   case STAT_SAT: return STATUS_SAT;
   case STAT_UNSAT: return STATUS_UNSAT;
   default: return STATUS_UNKNOWN;
   }
+}
+
+static smt_status_t ysat_preprocess(void *solver) {
+  // use new sat solver
+  switch (nsat_apply_preprocessing(solver)) {
+  case STAT_SAT: return STATUS_SAT;
+  case STAT_UNSAT: return STATUS_UNSAT;
+  default: return STATUS_UNKNOWN;
+  }
+}
+
+static void ysat_export_to_dimacs(void *solver, FILE *f) {
+  nsat_export_to_dimacs(f, solver);
 }
 
 static bval_t ysat_get_value(void *solver, bvar_t x) {
@@ -86,10 +105,15 @@ static void ysat_delete(void *solver) {
   safe_free(solver);
 }
 
+#if 0
 static void ysat_keep_var(void *solver, bvar_t x) {
   nsat_solver_keep_var(solver, x);
 }
+#endif
 
+#define USE_CUTS 1
+
+#if USE_CUTS
 static void ysat_var_def2(void *solver, bvar_t x, uint32_t b, literal_t l1, literal_t l2) {
   nsat_solver_add_def2(solver, x, b, l1, l2);
 }
@@ -97,14 +121,16 @@ static void ysat_var_def2(void *solver, bvar_t x, uint32_t b, literal_t l1, lite
 static void ysat_var_def3(void *solver, bvar_t x, uint32_t b, literal_t l1, literal_t l2, literal_t l3) {
   nsat_solver_add_def3(solver, x, b, l1, l2, l3);
 }
+#endif
 
 static void ysat_as_delegate(delegate_t *d, uint32_t nvars) {
   d->solver = (sat_solver_t *) safe_malloc(sizeof(sat_solver_t));
   init_nsat_solver(d->solver, nvars, true); // with preprocessing
   // init_nsat_solver(d->solver, nvars, false); // without preprocessing
   nsat_set_randomness(d->solver, 0.01);
-  nsat_set_var_decay_factor(d->solver, 0.6);
   nsat_set_reduce_fraction(d->solver, 12);
+  nsat_set_res_clause_limit(d->solver, 300);   // more agressive var elimination
+  nsat_set_res_extra(d->solver, 20);
   nsat_set_simplify_subst_delta(d->solver, 30);
   nsat_solver_add_vars(d->solver, nvars);
   //
@@ -118,18 +144,27 @@ static void ysat_as_delegate(delegate_t *d, uint32_t nvars) {
   d->get_value = ysat_get_value;
   d->set_verbosity = ysat_set_verbosity;
   d->delete = ysat_delete;
+
   // experimental
-  d->keep_var = ysat_keep_var;
+  //  d->keep_var = ysat_keep_var;
+  d->keep_var = NULL; // don't use
+
+#if USE_CUTS
+  // with cut enumeration
   d->var_def2 = ysat_var_def2;
   d->var_def3 = ysat_var_def3;
+#else
+  // without
+  d->var_def2 = NULL;
+  d->var_def3 = NULL;
+#endif
+  // more experimental functions
+  d->preprocess = ysat_preprocess;
+  d->export = ysat_export_to_dimacs;
 }
 
 
-/*
- * WRAPPERS FOR CADICAL
- */
-
-#if HAVE_CADICAL
+#if HAVE_CADICAL || HAVE_KISSAT
 /*
  * Conversion from literal_t to dimacs:
  * - in Yices, variables are indexed from 0 to nvars-1.
@@ -143,7 +178,13 @@ static inline int lit2dimacs(literal_t l) {
   int x = var_of(l) + 1;
   return is_pos(l) ? x : - x;
 }
+#endif
 
+/*
+ * WRAPPERS FOR CADICAL
+ */
+
+#if HAVE_CADICAL
 static void cadical_add_empty_clause(void *solver) {
   ccadical_add(solver, 0);
 }
@@ -244,6 +285,8 @@ static void cadical_as_delegate(delegate_t *d, uint32_t nvars) {
   d->keep_var = NULL;
   d->var_def2 = NULL;
   d->var_def3 = NULL;
+  d->preprocess = NULL;
+  d->export = NULL;
 }
 
 #endif
@@ -339,10 +382,116 @@ static void cryptominisat_as_delegate(delegate_t *d, uint32_t nvars) {
   d->keep_var = NULL;
   d->var_def2 = NULL;
   d->var_def3 = NULL;
+  d->preprocess = NULL;
+  d->export = NULL;
 }
 
 #endif
 
+
+/*
+ * WRAPPERS FOR KISSAT
+ */
+#if HAVE_KISSAT
+static void kissat_add_empty_clause(void *solver) {
+  kissat_add(solver, 0);
+}
+
+static void kissat_add_unit_clause(void *solver, literal_t l) {
+  kissat_add(solver, lit2dimacs(l));
+  kissat_add(solver, 0);
+}
+
+static void kissat_add_binary_clause(void *solver, literal_t l1, literal_t l2) {
+  kissat_add(solver, lit2dimacs(l1));
+  kissat_add(solver, lit2dimacs(l2));
+  kissat_add(solver, 0);
+}
+
+static void kissat_add_ternary_clause(void *solver, literal_t l1, literal_t l2, literal_t l3) {
+  kissat_add(solver, lit2dimacs(l1));
+  kissat_add(solver, lit2dimacs(l2));
+  kissat_add(solver, lit2dimacs(l3));
+  kissat_add(solver, 0);
+}
+
+static void kissat_add_clause(void *solver, uint32_t n, literal_t *a) {
+  uint32_t i;
+
+  for (i=0; i<n; i++) {
+    kissat_add(solver, lit2dimacs(a[i]));
+  }
+  kissat_add(solver, 0);
+}
+
+static smt_status_t kissat_check(void *solver) {
+  switch (kissat_solve(solver)) {
+  case 10: return STATUS_SAT;
+  case 20: return STATUS_UNSAT;
+  default: return STATUS_UNKNOWN;
+  }
+}
+
+
+/*
+ * Important: the rest of Yices (including the bit-vector solver)
+ * assumes that the backend SAT solver assign a value to all variables.
+ * kissat does not do this. It may return that variable x has
+ * value "unknown". This means that 'x' does not occur in any clause
+ * sent to kissat.
+ * We convert  unknown to VAL_FALSE here.
+ */
+static bval_t kissat_get_value(void *solver, bvar_t x) {
+  int v;
+
+  v = kissat_value(solver, x + 1); // x+1 = variable in kissat = positive literal
+  // v = value assigned in kissat: -1 means false, +1 means true, 0 means unknown
+
+  return (v <= 0) ? VAL_FALSE : VAL_TRUE;
+}
+
+static void kissat_set_verbosity(void *solver, uint32_t level) {
+  // verbosity 0 --> nothing (quiet = true)
+  // verbosity 1 --> normal kissat output (quiet = false)
+  // verbosity 2 --> kissat verbosity 1
+  // verbosity 3 --> kissat verbosity 2
+  if (level == 0) {
+    kissat_set_option(solver, "quiet", 1);
+  } else {
+    kissat_set_option(solver, "quiet", 0);
+    if (level == 2) {
+      kissat_set_option(solver, "verbose", 1);
+    } else if (level >= 3) {
+      kissat_set_option(solver, "verbose", 2);
+    }
+  }
+}
+
+static void kissat_delete(void *solver) {
+  kissat_release(solver);
+}
+
+static void kissat_as_delegate(delegate_t *d, uint32_t nvars) {
+  d->solver = kissat_init();
+  kissat_set_option(d->solver, "quiet", 1); // no output from kissat by default
+  init_ivector(&d->buffer, 0); // not used
+  d->add_empty_clause = kissat_add_empty_clause;
+  d->add_unit_clause = kissat_add_unit_clause;
+  d->add_binary_clause = kissat_add_binary_clause;
+  d->add_ternary_clause = kissat_add_ternary_clause;
+  d->add_clause = kissat_add_clause;
+  d->check = kissat_check;
+  d->get_value = kissat_get_value;
+  d->set_verbosity = kissat_set_verbosity;
+  d->delete = kissat_delete;
+  d->keep_var = NULL;
+  d->var_def2 = NULL;
+  d->var_def3 = NULL;
+  d->preprocess = NULL;
+  d->export = NULL;
+}
+
+#endif
 
 
 /*
@@ -365,6 +514,11 @@ bool init_delegate(delegate_t *d, const char *solver_name, uint32_t nvars) {
 #if HAVE_CRYPTOMINISAT
   } else if (strcmp("cryptominisat", solver_name) == 0) {
     cryptominisat_as_delegate(d, nvars);
+    return true;
+#endif
+#if HAVE_KISSAT
+  } else if (strcmp("kissat", solver_name) == 0) {
+    kissat_as_delegate(d, nvars);
     return true;
 #endif
   }
@@ -400,6 +554,15 @@ bool supported_delegate(const char *solver_name, bool *unknown) {
   if (strcmp("cryptominisat", solver_name) == 0) {
     *unknown = false;
 #if HAVE_CRYPTOMINISAT
+    return true;
+#else
+    return false;
+#endif
+  }
+
+  if (strcmp("kissat", solver_name) == 0) {
+    *unknown = false;
+#if HAVE_KISSAT
     return true;
 #else
     return false;
@@ -654,6 +817,34 @@ smt_status_t solve_with_delegate(delegate_t *d, smt_core_t *core) {
   }
   return d->check(d->solver);
 }
+
+
+/*
+ * Copy all the clauses of core to delegate d then call the delegate's preprocessor
+ */
+smt_status_t preprocess_with_delegate(delegate_t *d, smt_core_t *core) {
+  if (d->preprocess == NULL) return STATUS_UNKNOWN; // not supported
+
+  copy_problem_clauses(d, core);
+  if (d->keep_var != NULL) {
+    mark_atom_variables(d, core);
+  }
+  if (d->var_def2 != NULL && d->var_def3 != NULL) {
+    export_gate_definitions(d, core);
+  }
+  return d->preprocess(d->solver);
+}
+
+
+/*
+ * Export to DIMACS (do nothing if that's not supported by the delegate)
+ */
+void export_to_dimacs_with_delegate(delegate_t *d, FILE *f) {
+  if (d->export != NULL) {
+    d->export(d->solver, f);
+  }
+}
+
 
 /*
  * Value assigned to variable x in the delegate

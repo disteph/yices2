@@ -82,6 +82,7 @@ static const int32_t solver_code[NUM_SOLVER_CODES] = {
 typedef enum ctx_config_key {
   CTX_CONFIG_KEY_MODE,
   CTX_CONFIG_KEY_SOLVER_TYPE,
+  CTX_CONFIG_KEY_TRACE_TAGS,
   CTX_CONFIG_KEY_ARITH_FRAGMENT,
   CTX_CONFIG_KEY_UF_SOLVER,
   CTX_CONFIG_KEY_ARRAY_SOLVER,
@@ -99,6 +100,7 @@ static const char *const config_key_names[NUM_CONFIG_KEYS] = {
   "bv-solver",
   "mode",
   "solver-type",
+  "trace",
   "uf-solver",
 };
 
@@ -109,6 +111,7 @@ static const int32_t config_key[NUM_CONFIG_KEYS] = {
   CTX_CONFIG_KEY_BV_SOLVER,
   CTX_CONFIG_KEY_MODE,
   CTX_CONFIG_KEY_SOLVER_TYPE,
+  CTX_CONFIG_KEY_TRACE_TAGS,
   CTX_CONFIG_KEY_UF_SOLVER,
 };
 
@@ -241,6 +244,7 @@ static const ctx_config_t default_config = {
   CTX_CONFIG_DEFAULT,     // bv
   CTX_CONFIG_DEFAULT,     // arith
   ARITH_LIRA,             // fragment
+  NULL,                   // trace tags
 };
 
 
@@ -358,6 +362,10 @@ int32_t config_set_field(ctx_config_t *config, const char *key, const char *valu
     } else {
       config->solver_type = v;
     }
+    break;
+
+  case CTX_CONFIG_KEY_TRACE_TAGS:
+    config->trace_tags = strdup(value);
     break;
 
   case CTX_CONFIG_KEY_ARITH_FRAGMENT:
@@ -537,6 +545,18 @@ static bool arch_supports_mode(context_arch_t a, context_mode_t mode) {
 
 
 /*
+ * Check whether the architecture is supported.
+ */
+static bool arch_is_supported(context_arch_t a) {
+#if HAVE_MCSAT
+  return true; // all architectures are supported
+#else
+  return a != CTX_ARCH_MCSAT;
+#endif
+}
+
+
+/*
  * Check whether config is valid (and supported by this version of Yices)
  * and convert it to a tuple (arch, mode, iflag, qflag)
  * - arch = architecture code as defined in context.h
@@ -587,7 +607,7 @@ int32_t decode_config(const ctx_config_t *config, smt_logic_t *logic, context_ar
     }
 
     a = logic2arch[logic_code];
-    if (a < 0) {
+    if (a < 0 || !arch_is_supported(a)) {
       // not supported
       r = -2;
     } else {
@@ -600,15 +620,19 @@ int32_t decode_config(const ctx_config_t *config, smt_logic_t *logic, context_ar
     }
 
   } else if (config->solver_type == CTX_SOLVER_TYPE_MCSAT) {
-    /*
-     * MCSAT solver/no logic specified
-     */
-    *logic = SMT_UNKNOWN;
-    *arch = CTX_ARCH_MCSAT;
-    *mode = CTX_MODE_PUSHPOP;
-    *iflag = false;
-    *qflag = false;
-    goto done;
+    if (arch_is_supported(CTX_ARCH_MCSAT)) {
+      /*
+       * MCSAT solver/no logic specified
+       */
+      *logic = SMT_UNKNOWN;
+      *arch = CTX_ARCH_MCSAT;
+      *mode = CTX_MODE_PUSHPOP;
+      *iflag = false;
+      *qflag = false;
+    } else {
+      // not compiled with MCSAT support so this is not supported
+      r = -2;
+    }
 
   } else {
     /*
@@ -671,7 +695,7 @@ bool logic_requires_mcsat(smt_logic_t code) {
  * - LIA is not tested.
  */
 bool logic_is_supported_by_ef(smt_logic_t code) {
-  return code == NONE || code == BV || code == IDL || code == LRA || code == RDL || code == LIA;
+  return code == NONE || code == BV || code == IDL || code == LRA || code == RDL || code == LIA || code == UF;
 }
 
 
@@ -682,6 +706,9 @@ int32_t ef_arch_for_logic(smt_logic_t code) {
   switch (code) {
   case NONE:
     return CTX_ARCH_NOSOLVERS;
+
+  case UF:
+    return CTX_ARCH_EG;
 
   case BV:
     return CTX_ARCH_BV;

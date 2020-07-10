@@ -35,7 +35,7 @@
 
 #include <stdio.h>
 #include <inttypes.h>
-#include "term_printer.h"
+#include "io/term_printer.h"
 
 static void print_finite_domain(FILE *f, term_table_t *tbl, finite_domain_t *d) {
   uint32_t i, n;
@@ -112,9 +112,7 @@ static void collect_finite_domain(term_table_t *tbl, int_hset_t *cache, ivector_
       }
     } else {
       // t must be a constant, not already in v
-      assert(term_kind(tbl, t) == ARITH_CONSTANT ||
-             term_kind(tbl, t) == BV64_CONSTANT ||
-             term_kind(tbl, t) == BV_CONSTANT);
+      assert(is_const_term(tbl, t));
       ivector_push(v, t);
     }
   }
@@ -1196,7 +1194,6 @@ bool arith_term_is_nonneg(term_table_t *tbl, term_t t, bool check_ite) {
     return polynomial_is_nonneg(poly_term_desc(tbl, t));
 
   case ARITH_ABS:
-  case ARITH_MOD:
     return true;
 
   case ARITH_FLOOR:
@@ -2779,7 +2776,7 @@ void factor_bvterm(term_table_t *tbl, term_t t, bvfactor_buffer_t *b) {
  * - t must be a bitvector term
  * - b and t must have the same bitsize
  * - if t has 64bits or less, a is given as a 64bit constant
- * - if t has more than 64bits, a iis given as an array of 32bit words
+ * - if t has more than 64bits, a is given as an array of 32bit words
  */
 void factor_mul_bvterm64(term_table_t *tbl, uint64_t a, term_t t, bvfactor_buffer_t *b) {
   assert(is_bitvector_term(tbl, t));

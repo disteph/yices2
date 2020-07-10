@@ -535,6 +535,7 @@ static bool try_left_replace64(bvfactoring_t *r, term_table_t *terms, term_t t, 
     i = 0;
     if (p->mono[0].var == const_idx) {
       bvfactor_buffer_mulconst64(r->reduced1, p->mono[i].coeff, 1);
+      bvfactor_buffer_normalize(r->reduced1);
       i = 1;
     }
     while (i<r->n1) {
@@ -559,6 +560,7 @@ static bool try_left_replace(bvfactoring_t *r, term_table_t *terms, term_t t, bv
     i = 0;
     if (p->mono[0].var == const_idx) {
       bvfactor_buffer_mulconst(r->reduced1, p->mono[i].coeff, 1);
+      bvfactor_buffer_normalize(r->reduced1);
       i = 1;
     }
     while (i<r->n1) {
@@ -584,6 +586,7 @@ static bool try_right_replace64(bvfactoring_t *r, term_table_t *terms, term_t t,
     i = 0;
     if (p->mono[0].var == const_idx) {
       bvfactor_buffer_mulconst64(r->reduced2, p->mono[i].coeff, 1);
+      bvfactor_buffer_normalize(r->reduced2);
       i = 1;
     }
     while (i<r->n2) {
@@ -608,6 +611,7 @@ static bool try_right_replace(bvfactoring_t *r, term_table_t *terms, term_t t, b
     i = 0;
     if (p->mono[0].var == const_idx) {
       bvfactor_buffer_mulconst(r->reduced2, p->mono[i].coeff, 1);
+      bvfactor_buffer_normalize(r->reduced2);
       i = 1;
     }
     while (i<r->n2) {
@@ -2462,7 +2466,7 @@ void process_aux_atoms(context_t *ctx) {
 	// contradiction
 	longjmp(ctx->env, TRIVIALLY_UNSAT);
       } else if (code != bool2code(true)) {
-	ivector_push(&ctx->top_atoms, r);
+	ivector_push(&ctx->top_interns, r);
       }
     } else {
       // not mapped

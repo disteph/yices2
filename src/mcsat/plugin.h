@@ -15,7 +15,7 @@
  * You should have received a copy of the GNU General Public License
  * along with Yices.  If not, see <http://www.gnu.org/licenses/>.
  */
- 
+
 #ifndef PLUGIN_H_
 #define PLUGIN_H_
 
@@ -80,6 +80,9 @@ struct plugin_context_s {
   /** The tracer */
   tracer_t* tracer;
 
+  /** Has the search been interrupted */
+  const bool* stop_search;
+
   /** Request term registration for this kind */
   void (*request_term_notification_by_kind) (plugin_context_t* self, term_kind_t kind);
 
@@ -135,6 +138,11 @@ struct trail_token_s {
    * Add a top-level lemma that will stay for the current user level.
    */
   void (*lemma) (trail_token_t* token, term_t lemma);
+
+  /**
+   * Add a definition lemma that will stay for as long as the variable is there.
+   */
+  void (*definition_lemma) (trail_token_t* token, term_t lemma, term_t x);
 
 };
 
@@ -212,6 +220,20 @@ struct plugin_s {
   void (*decide) (plugin_t* plugin, variable_t x, trail_token_t* decide, bool must);
 
   /**
+   * Decide an assumption variable to a given value. The token can be used
+   * only once. The plugin must decide on the given variable even if the value is
+   * inconsistent. If the value is inconsistent, a conflict must be reported.
+   */
+  void (*decide_assignment) (plugin_t* plugin, variable_t x, const mcsat_value_t* value, trail_token_t* decide);
+
+  /*
+   * Optional: learn using the given trail token. This is called at base level after
+   * propagation is done and there is no conflict. This is a chance to perform some
+   * more expensive reasoning and propagate consequences.
+   */
+  void (*learn) (plugin_t* plugin, trail_token_t* prop);
+
+  /**
    * Explain the conflict that you reported. The plugin should return a conflict
    * such that
    *
@@ -238,11 +260,8 @@ struct plugin_s {
   term_t (*explain_propagation) (plugin_t* plugin, variable_t var, ivector_t* reasons);
 
   /**
-   * Explain an evaluation. Return true if the constraint indeed evaluates, and
-   * collect the variables that are responsible for the evaluation. If given
-   * value is not NULL, and the term evaluates, then put the evaluation into it.
-   * If the value is NULL, just collect the variables that contribute to the
-   * value. The output variables should be mcsat variables (variable_t).
+   * Explain an evaluation. Return true if the constraint indeed evaluates to the
+   * given value. The output variables should be mcsat variables (variable_t).
    */
   bool (*explain_evaluation) (plugin_t* plugin, term_t t, int_mset_t* vars, mcsat_value_t* value);
 
@@ -288,6 +307,7 @@ void plugin_construct(plugin_t* plugin) {
   plugin->new_lemma_notify      = NULL;
   plugin->propagate             = NULL;
   plugin->decide                = NULL;
+  plugin->learn                 = NULL;
   plugin->get_conflict          = NULL;
   plugin->explain_propagation   = NULL;
   plugin->explain_evaluation    = NULL;

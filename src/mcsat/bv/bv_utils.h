@@ -18,6 +18,15 @@
 
 #pragma once
 
+/*
+ * BD: this is needed to build in debug mode on cygwin/windows
+ */
+#if defined(CYGWIN) || defined(MINGW)
+#ifndef __YICES_DLLSPEC__
+#define __YICES_DLLSPEC__ __declspec(dllexport)
+#endif
+#endif
+
 #include <stdio.h>
 
 #include "utils/hash_functions.h"
@@ -74,6 +83,7 @@ bool bv_term_has_children(term_table_t* terms, term_t t) {
     case BV_ASHR:
     case EQ_TERM: // Boolean
     case OR_TERM: // Boolean
+    case XOR_TERM: // Boolean
     case BV_EQ_ATOM:
     case BV_GE_ATOM:
     case BV_SGE_ATOM:
@@ -107,6 +117,7 @@ bv_term_type_t bv_term_kind_get_type(term_kind_t kind) {
   case BV_ASHR:
   case EQ_TERM:
   case OR_TERM:
+  case XOR_TERM:
   case BV_EQ_ATOM:
   case BV_GE_ATOM:
   case BV_SGE_ATOM:
@@ -127,6 +138,12 @@ static inline bv_term_type_t bv_term_get_type(term_table_t* terms, term_t t) {
     return BV_TERM_COMPOSITE;
   } else {
     term_kind_t kind = term_kind(terms, t);
+    if (kind == EQ_TERM) {
+      composite_term_t* eq = eq_term_desc(terms, t);
+      if (!is_boolean_term(terms, eq->arg[0]) && !is_bitvector_term(terms, eq->arg[0])) {
+        return BV_TERM_VARIABLE;
+      }
+    }
     return bv_term_kind_get_type(kind);
   }
 }
@@ -139,7 +156,15 @@ static inline bv_term_type_t bv_term_get_type(term_table_t* terms, term_t t) {
  */
 static inline
 bool bv_term_is_variable(term_table_t* terms, term_t t) {
-  return bv_term_get_type(terms, t) == BV_TERM_VARIABLE;
+  if (bv_term_get_type(terms, t) == BV_TERM_VARIABLE)
+    return true;
+  if (term_kind(terms, t) == EQ_TERM) {
+    composite_term_t* eq = eq_term_desc(terms, t);
+    if (!is_boolean_term(terms, eq->arg[0]) && !is_bitvector_term(terms, eq->arg[0])) {
+      return true;
+    }
+  }
+  return false;
 }
 
 /**
@@ -191,18 +216,23 @@ void bv_term_compute_value(term_table_t* terms, term_t t, bvconstant_t** childre
     }
     case BV_DIV:
       bvconst_udiv2z(out_value->data, bitsize, children_values[0]->data, children_values[1]->data);
+      bvconst_normalize(out_value->data, bitsize);
       break;
     case BV_REM:
       bvconst_urem2z(out_value->data, bitsize, children_values[0]->data, children_values[1]->data);
+      bvconst_normalize(out_value->data, bitsize);
       break;
     case BV_SDIV:
       bvconst_sdiv2z(out_value->data, bitsize, children_values[0]->data, children_values[1]->data);
+      bvconst_normalize(out_value->data, bitsize);
       break;
     case BV_SREM:
       bvconst_srem2z(out_value->data, bitsize, children_values[0]->data, children_values[1]->data);
+      bvconst_normalize(out_value->data, bitsize);
       break;
     case BV_SMOD:
       bvconst_smod2z(out_value->data, bitsize, children_values[0]->data, children_values[1]->data);
+      bvconst_normalize(out_value->data, bitsize);
       break;
     case BV_SHL:
       bvconst_lshl(out_value->data, children_values[0]->data, children_values[1]->data, bitsize);
@@ -231,6 +261,18 @@ void bv_term_compute_value(term_table_t* terms, term_t t, bvconstant_t** childre
         if (bit_i) {
           bvconst_set_bit(out_value->data, 0);
           break;
+        }
+      }
+      break;
+    }
+    case XOR_TERM: {
+      composite_term_t* t_composite = xor_term_desc(terms, t);
+      uint32_t t_arity = t_composite->arity;
+      bvconst_clr_bit(out_value->data, 0);
+      for (uint32_t i = 0; i < t_arity; ++i) {
+        bool bit_i = bvconst_tst_bit(children_values[i]->data, 0);
+        if (bit_i) {
+          bvconst_flip_bit(out_value->data, 0);
         }
       }
       break;

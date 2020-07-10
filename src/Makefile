@@ -125,10 +125,12 @@ core_src_c := \
 	context/pseudo_subst.c \
 	context/shared_terms.c \
 	context/symmetry_breaking.c \
+	context/quant_context.c \
 	exists_forall/ef_client.c \
 	exists_forall/ef_analyze.c \
 	exists_forall/ef_parameters.c \
-	exists_forall/ef_problem.c \
+	exists_forall/ef_values.c \
+	exists_forall/ef_skolemize.c \
 	exists_forall/efsolver.c \
 	frontend/smt2/attribute_values.c \
 	frontend/yices/yices_lexer.c \
@@ -175,6 +177,7 @@ core_src_c := \
 	solvers/bv/bvpoly_dag.c \
 	solvers/bv/bvsolver.c \
 	solvers/bv/bv_vartable.c \
+	solvers/bv/dimacs_printer.c \
 	solvers/bv/merge_table.c \
 	solvers/bv/remap_table.c \
 	solvers/cdcl/delegate.c \
@@ -182,6 +185,7 @@ core_src_c := \
 	solvers/cdcl/gates_manager.c \
 	solvers/cdcl/new_gates.c \
 	solvers/cdcl/new_gate_hash_map.c \
+	solvers/cdcl/new_gate_hash_map2.c \
 	solvers/cdcl/new_sat_solver.c \
 	solvers/cdcl/smt_core.c \
 	solvers/cdcl/truth_tables.c \
@@ -196,7 +200,9 @@ core_src_c := \
 	solvers/floyd_warshall/dl_vartable.c \
 	solvers/floyd_warshall/idl_floyd_warshall.c \
 	solvers/floyd_warshall/rdl_floyd_warshall.c \
+	solvers/funs/fun_level.c \
 	solvers/funs/fun_solver.c \
+	solvers/funs/stratification.c \
 	solvers/simplex/arith_atomtable.c \
 	solvers/simplex/arith_vartable.c \
 	solvers/simplex/diophantine_systems.c \
@@ -205,6 +211,8 @@ core_src_c := \
 	solvers/simplex/matrices.c \
 	solvers/simplex/offset_equalities.c \
 	solvers/simplex/simplex.c \
+	solvers/quant/ef_problem.c \
+	solvers/quant/quant_solver.c \
 	terms/balanced_arith_buffers.c \
 	terms/bit_expr.c \
 	terms/bit_term_conversion.c \
@@ -299,6 +307,7 @@ core_src_c := \
 	utils/refcount_strings.c \
 	utils/resize_arrays.c \
 	utils/simple_cache.c \
+	utils/simple_int_stack.c \
 	utils/sparse_arrays.c \
 	utils/stable_sort.c \
 	utils/string_buffers.c \
@@ -415,7 +424,6 @@ extra_src_c := \
 	scratch/bool_vartable.c \
 	scratch/update_graph.c \
 	solvers/bv/bvsolver_printer.c \
-	solvers/bv/dimacs_printer.c \
 	solvers/cdcl/clause_pool.c \
 	solvers/cdcl/gates_printer.c \
 	solvers/cdcl/sat_solver.c \
@@ -591,6 +599,13 @@ libyices_def=libyices.def
 ###########################
 #   COMPILATION FLAGS     #
 ###########################
+
+#
+# Whether we are building for a big endian architecture
+#
+ifeq ($(WORDS_BIGENDIAN),yes)
+  CPPFLAGS += -DWORDS_BIGENDIAN
+endif
 
 #
 # Whether we have support for mcsat
@@ -783,6 +798,10 @@ ifeq ($(YICES_MODE),gcov)
 CFLAGS := $(CFLAGS) -fprofile-arcs -ftest-coverage -g -O0
 CPPFLAGS := $(CPPFLAGS) -DNDEBUG
 else
+ifeq ($(YICES_MODE),sanitize)
+CFLAGS := $(CFLAGS) -O3 -g -fsanitize=address,undefined -fno-omit-frame-pointer
+CPPFLAGS := $(CPPFLAGS) -DNDEBUG
+else
 ifeq ($(findstring $(YICES_MODE),valgrind quantify purify),$(YICES_MODE))
 CFLAGS := $(CFLAGS) -O3 -g
 CPPFLAGS := $(CPPFLAGS) -DNDEBUG
@@ -806,7 +825,7 @@ endif
 endif
 endif
 endif
-
+endif
 
 #
 # Object files to include in the dynamic libraries
@@ -1208,7 +1227,6 @@ dist: bin lib
 	cp $(bindir)/yices$(EXEEXT) $(distdir)/bin/yices$(EXEEXT)
 	cp $(bindir)/yices_smtcomp$(EXEEXT) $(distdir)/bin/yices-smt$(EXEEXT)
 	cp $(bindir)/yices_smt2$(EXEEXT) $(distdir)/bin/yices-smt2$(EXEEXT)
-	cp $(bindir)/yices_smt2_mt$(EXEEXT) $(distdir)/bin/yices-mt2$(EXEEXT)
 	cp $(bindir)/yices_sat$(EXEEXT) $(distdir)/bin/yices-sat$(EXEEXT)
 	cp $(bindir)/*.dll $(distdir)/bin || true
 	mkdir $(distdir)/lib
@@ -1217,7 +1235,6 @@ ifneq ($(YICES_MODE),debug)
 	$(STRIP) $(STRIPFLAGS) $(distdir)/bin/yices$(EXEEXT)
 	$(STRIP) $(STRIPFLAGS) $(distdir)/bin/yices-smt$(EXEEXT)
 	$(STRIP) $(STRIPFLAGS) $(distdir)/bin/yices-smt2$(EXEEXT)
-	$(STRIP) $(STRIPFLAGS) $(distdir)/bin/yices-mt2$(EXEEXT)
 	$(STRIP) $(STRIPFLAGS) $(distdir)/bin/yices-sat$(EXEEXT)
 endif
 
@@ -1229,7 +1246,6 @@ static-dist: static-bin static-lib
 	cp $(static_bindir)/yices$(EXEEXT) $(static_distdir)/bin/yices$(EXEEXT)
 	cp $(static_bindir)/yices_smtcomp$(EXEEXT) $(static_distdir)/bin/yices-smt$(EXEEXT)
 	cp $(static_bindir)/yices_smt2$(EXEEXT) $(static_distdir)/bin/yices-smt2$(EXEEXT)
-	cp $(static_bindir)/yices_smt2_mt$(EXEEXT) $(static_distdir)/bin/yices-mt2$(EXEEXT)
 	cp $(static_bindir)/yices_sat$(EXEEXT) $(static_distdir)/bin/yices-sat$(EXEEXT)
 	cp $(static_bindir)/*.dll $(static_distdir)/bin || true
 	mkdir $(static_distdir)/lib
@@ -1238,7 +1254,6 @@ ifneq ($(YICES_MODE),debug)
 	$(STRIP) $(STRIPFLAGS) $(static_distdir)/bin/yices$(EXEEXT)
 	$(STRIP) $(STRIPFLAGS) $(static_distdir)/bin/yices-smt$(EXEEXT)
 	$(STRIP) $(STRIPFLAGS) $(static_distdir)/bin/yices-smt2$(EXEEXT)
-	$(STRIP) $(STRIPFLAGS) $(static_distdir)/bin/yices-mt2$(EXEEXT)
 	$(STRIP) $(STRIPFLAGS) $(static_distdir)/bin/yices-sat$(EXEEXT)
 endif
 

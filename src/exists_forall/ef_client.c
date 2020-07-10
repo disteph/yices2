@@ -62,20 +62,19 @@ void delete_ef_client(ef_client_t *efc) {
 
 /*
  * Build the EF-problem descriptor from the set of delayed assertions
+ * - n = number of assertions
+ * - assertions = array of n Boolean terms
  * - do nothing if efprob exists already
  * - store the internalization code in the global efcode flag
  */
-void build_ef_problem(ef_client_t *efc, ivector_t *assertions) {
+void build_ef_problem(ef_client_t *efc, uint32_t n, term_t *assertions, ptr_hmap_t *patterns) {
   ef_analyzer_t analyzer;
-  ivector_t *v;
 
   if (efc->efprob == NULL) {
-    v = assertions;
-
     efc->efprob = (ef_prob_t *) safe_malloc(sizeof(ef_prob_t));
     init_ef_analyzer(&analyzer, __yices_globals.manager);
-    init_ef_prob(efc->efprob, __yices_globals.manager);
-    efc->efcode = ef_analyze(&analyzer, efc->efprob, v->size, v->data,
+    init_ef_prob(efc->efprob, __yices_globals.manager, patterns);
+    efc->efcode = ef_analyze(&analyzer, efc->efprob, n, assertions,
 			     efc->ef_parameters.flatten_ite,
 			     efc->ef_parameters.flatten_iff);
     delete_ef_analyzer(&analyzer);
@@ -116,24 +115,38 @@ model_t *ef_get_model(ef_client_t *efc, efmodel_error_code_t *code){
 }
 
 
-
-void ef_solve(ef_client_t *efc, ivector_t *assertions, param_t *parameters,
-	      smt_logic_t logic_code, context_arch_t arch, tracer_t *tracer) {
-  build_ef_problem(efc, assertions);
+/*
+ * Call the exists/forall solver on an array of assertions.
+ * - n = number of assertions
+ * - assertions =  array of n Boolean terms
+ * - parameters = search parameters to be used by the two internal contexts
+ * - logic_code = quantifier-free logic for the contexts
+ * - arch = context archtitecture
+ * - tracer = NULL or an optional tracer for verbose output
+ *
+ * logic_code and arch are used to initialize the two internal contexts.
+ * logic_code must be quantifier free and arch must be a context
+ * architecture compatible with this logic.
+ */
+void ef_solve(ef_client_t *efc, uint32_t n, term_t *assertions, param_t *parameters,
+	      smt_logic_t logic_code, context_arch_t arch, tracer_t *tracer, ptr_hmap_t *patterns) {
+  build_ef_problem(efc, n, assertions, patterns);
 
   if (efc->efcode == EF_NO_ERROR){
-    if(! efc->efdone) {
+    if (!efc->efdone) {
       assert(efc->efsolver == NULL);
       efc->efsolver = (ef_solver_t *) safe_malloc(sizeof(ef_solver_t));
       init_ef_solver(efc->efsolver, efc->efprob, logic_code, arch);
       if (tracer != NULL) {
 	ef_solver_set_trace(efc->efsolver, tracer);
       }
+
       /*
        * If the problem has integer or real variables, we force GEN_BY_PROJ
        */
       ef_solver_check(efc->efsolver, parameters, efc->ef_parameters.gen_mode,
-		      efc->ef_parameters.max_samples, efc->ef_parameters.max_iters);
+		      efc->ef_parameters.max_samples, efc->ef_parameters.max_iters, efc->ef_parameters.max_numlearnt,
+		      efc->ef_parameters.ematching);
       efc->efdone = true;
     }
   }

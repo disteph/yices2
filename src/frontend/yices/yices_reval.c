@@ -85,6 +85,7 @@
 #include "io/concrete_value_printer.h"
 #include "io/yices_pp.h"
 #include "model/model_eval.h"
+#include "model/model_queries.h"
 #include "model/models.h"
 #include "model/projection.h"
 #include "parser_utils/term_stack2.h"
@@ -92,12 +93,14 @@
 #include "solvers/bv/bvsolver.h"
 #include "solvers/bv/dimacs_printer.h"
 #include "solvers/funs/fun_solver.h"
+#include "solvers/quant/quant_solver.h"
 #include "solvers/simplex/simplex.h"
 #include "terms/rationals.h"
 #include "utils/command_line.h"
 #include "utils/cputime.h"
 #include "utils/memsize.h"
 #include "utils/refcount_strings.h"
+#include "utils/simple_int_stack.h"
 #include "utils/string_utils.h"
 #include "utils/timeout.h"
 
@@ -193,14 +196,14 @@ static param_t parameters;
  */
 static bool efmode;
 
-
 /*
- * If mode = one-shot or ef
+ * Stack of assertions
  * - all assertions are pushed into this vector
- * - all assertions are then processed at once on the call to
- *   (check) or (ef-solve)
+ *
+ * - if mode == one-check, then assertions are processed at once
+ *   by (check) or (ef-solve)
  */
-static ivector_t delayed_assertions;
+static simple_istack_t assertions;
 
 /*
  * Counters for run-time statistics
@@ -669,7 +672,7 @@ static void process_command_line(int argc, char *argv[]) {
   } else if (mode_code == EFSOLVER_MODE) {
     /*
      * EF-Solver enabled:
-     * we set mode to ONE_CHECK so that assertions get added to the delayed_assertion vector
+     * we set mode to ONE_CHECK to handle all assertions at once
      */
     mode = CTX_MODE_ONECHECK;
     efmode = true;
@@ -1929,6 +1932,13 @@ static void show_funsolver_stats(fun_solver_stats_t *stat) {
   printf(" extensionality axioms   : %"PRIu32"\n", stat->num_extensionality_axiom);
 }
 
+static void show_quantsolver_stats(quant_solver_stats_t *stat) {
+  printf("Quantifiers\n");
+  printf(" quantifiers             : %"PRIu32"\n", stat->num_quantifiers);
+  printf(" patterns                : %"PRIu32"\n", stat->num_patterns);
+  printf(" instances               : %"PRIu32"\n", stat->num_instances);
+}
+
 static void show_simplex_stats(simplex_stats_t *stat) {
   printf("Simplex\n");
   printf(" init. variables         : %"PRIu32"\n", stat->num_init_vars);
@@ -1993,6 +2003,7 @@ static void yices_showstats_cmd(void) {
   egraph_t *egraph;
   simplex_solver_t *simplex;
   fun_solver_t *fsolver;
+  quant_solver_t *qsolver;
   double run_time;
   double mem_used;
 
@@ -2014,8 +2025,12 @@ static void yices_showstats_cmd(void) {
       printf(" egraph terms            : %"PRIu32"\n", egraph->terms.nterms);
       printf(" egraph eq_quota         : %"PRIu32"\n", egraph->aux_eq_quota);
       if (context_has_fun_solver(context)) {
-	fsolver = context->fun_solver;
-	show_funsolver_stats(&fsolver->stats);
+        fsolver = context->fun_solver;
+        show_funsolver_stats(&fsolver->stats);
+      }
+      if (context_has_quant_solver(context)) {
+        qsolver = context->quant_solver;
+        show_quantsolver_stats(&qsolver->stats);
       }
     }
 
@@ -2107,12 +2122,12 @@ static void yices_help_cmd(const char *topic) {
 static void yices_reset_cmd(void) {
   if (efmode) {
     delete_ef_client(&ef_client_globals);
-    ivector_reset(&delayed_assertions);
+    reset_simple_istack(&assertions);
     model = NULL;
   } else {
     cleanup_globals();
     reset_labeled_assertion_stack(&labeled_assertions);
-    ivector_reset(&delayed_assertions);
+    reset_simple_istack(&assertions);
     reset_context(context);
   }
   print_ok();
@@ -2128,6 +2143,7 @@ static void yices_push_cmd(void) {
   } else if (! context_supports_pushpop(context)) {
     report_error("push/pop not supported by this context");
   } else {
+    simple_istack_push(&assertions);
     cleanup_context();
     switch (context_status(context)) {
     case STATUS_IDLE:
@@ -2163,6 +2179,7 @@ static void yices_pop_cmd(void) {
   } else if (context_base_level(context) == 0) {
     report_error("pop not allowed at bottom level");
   } else {
+    simple_istack_pop(&assertions);
     cleanup_context();
     switch (context_status(context)) {
     case STATUS_UNSAT:
@@ -2192,12 +2209,12 @@ static void yices_assert_cmd(term_t f) {
 
   if (efmode) {
     /*
-     * Exists/forall: we add f to the delayed assertions vector
+     * Exists/forall: we add f to the stack only
      */
     if (ef_client_globals.efdone) {
       report_error("more assertions are not allowed after (ef-solve)");
     } else if (yices_term_is_bool(f)) {
-      ivector_push(&delayed_assertions, f);
+      simple_istack_add(&assertions, f);
       print_ok();
     } else {
       report_error("type error in assert: boolean term required");
@@ -2210,7 +2227,7 @@ static void yices_assert_cmd(term_t f) {
     if (context_status(context) != STATUS_IDLE) {
       report_error("more assertions are not allowed");
     } else if (yices_term_is_bool(f)) {
-      ivector_push(&delayed_assertions, f);
+      simple_istack_add(&assertions, f);
       print_ok();
     } else {
       report_error("type error in assert: boolean term required");
@@ -2225,6 +2242,9 @@ static void yices_assert_cmd(term_t f) {
     case STATUS_IDLE:
       if (yices_term_is_bool(f)) {
 	code = assert_formula(context, f);
+	if (code == CTX_NO_ERROR) {
+	  simple_istack_add(&assertions, f);
+	}
 	print_internalization_code(code);
       } else {
 	report_error("type error in assert: boolean term required");
@@ -2261,7 +2281,7 @@ static void yices_named_assert_cmd(term_t t, char *label) {
   } else if (mode == CTX_MODE_ONECHECK) {
     report_error("labeled assertions are not supported in one-shot mode");
   } else if (arch == CTX_ARCH_MCSAT) {
-    report_error("the non-linear solver does not support labeled assertions");
+    report_error("the MC-SAT solver does not support labeled assertions");
   } else if (labeled_assertions_has_name(&labeled_assertions, label)) {
     report_error("duplicate assertion label");
   } else if (!yices_term_is_bool(t)) {
@@ -2273,6 +2293,7 @@ static void yices_named_assert_cmd(term_t t, char *label) {
     case STATUS_IDLE:
       clone = clone_string(label);
       add_labeled_assertion(&labeled_assertions, t, clone);
+      simple_istack_add(&assertions, t);
       print_ok();
       break;
 
@@ -2508,8 +2529,9 @@ static void yices_check_cmd(void) {
     /*
      * Non-incremental
      */
-    // assert the delayed assertions
-    code = assert_formulas(context, delayed_assertions.size, delayed_assertions.data);
+    // assert the level-0 assertions
+    assert(assertions.nlevels == 0);
+    code = assert_formulas(context, assertions.top, assertions.data);
     if (code == CTX_NO_ERROR) {
       assert(context_status(context) == STATUS_IDLE);
       stat = do_check();
@@ -2830,6 +2852,34 @@ static model_t *efsolver_model(void) {
   return mdl;
 }
 
+
+/*
+ * Basic model display on stdout
+ */
+static void show_model(model_t *mdl) {
+  if (yices_pp_model(stdout, mdl, 140, UINT32_MAX, 0) < 0) {
+    report_system_error("stdout");
+  }
+  fflush(stdout);
+}
+
+/*
+ * Collect relevant variables for the current set of assertions.
+ * Display their values.
+ * The set of assertions is stored in the assertion stack.
+ */
+static void show_reduced_model(model_t *mdl) {
+  ivector_t support;
+
+  init_ivector(&support, 0);
+  model_get_terms_support(mdl, assertions.top, assertions.data, &support);
+  if (yices_pp_term_values(stdout, mdl, support.size, support.data, 140, UINT32_MAX, 0) < 0) {
+    report_system_error("stdout");
+  }
+  delete_ivector(&support);
+}
+
+
 /*
  * Build model if needed and display it
  */
@@ -2839,21 +2889,29 @@ static void yices_showmodel_cmd(void) {
   if (efmode) {
     mdl = efsolver_model();
     if (mdl != NULL) {
-      if (yices_pp_model(stdout, mdl, 140, UINT32_MAX, 0) < 0) {
-	report_system_error("stdout");
-      }
-      fflush(stdout);
+      show_model(mdl);
     }
   } else if (context_has_model("show-model")) {
-    // model_print(stdout, model);
-    // model_print_full(stdout, model);
-    if (yices_pp_model(stdout, model, 140, UINT32_MAX, 0) < 0) {
-      report_system_error("stdout");
-    }
-    fflush(stdout);
+    show_model(model);
   }
 }
 
+
+/*
+ * Build model if needed. Show only the useful values
+ */
+static void yices_show_reduced_model_cmd(void) {
+  model_t *mdl;
+
+  if (efmode) {
+    mdl = efsolver_model();
+    if (mdl != NULL) {
+      show_reduced_model(mdl);
+    }
+  } else if (context_has_model("show-reduced-model")) {
+    show_reduced_model(model);
+  }
+}
 
 
 /*
@@ -2983,7 +3041,7 @@ static void print_ef_status(void) {
  */
 static void yices_efsolve_cmd(void) {
   if (efmode) {
-    ef_solve(&ef_client_globals, &delayed_assertions, &parameters, logic_code, arch, tracer);
+    ef_solve(&ef_client_globals, assertions.top, assertions.data, &parameters, logic_code, arch, tracer, NULL);
     if (ef_client_globals.efcode != EF_NO_ERROR) {
       // error in preprocessing
       print_ef_analyze_code(ef_client_globals.efcode);
@@ -3070,7 +3128,7 @@ static void export_ef_problem(const char *s) {
   ivector_t all_ef;
   int code;
 
-  build_ef_problem(&ef_client_globals, &delayed_assertions);
+  build_ef_problem(&ef_client_globals, assertions.top, assertions.data, NULL);
   if (ef_client_globals.efcode != EF_NO_ERROR) {
     print_ef_analyze_code(ef_client_globals.efcode);
   } else {
@@ -3098,16 +3156,16 @@ static void export_ef_problem(const char *s) {
 
 
 /*
- * Export the delayed assertions
+ * Export the assertions
  */
-static void export_delayed_assertions(const char *s) {
+static void export_assertions(const char *s) {
   context_t *aux;
   int code;
 
   aux = yices_create_context(logic_code, arch, CTX_MODE_ONECHECK, false, false);
   disable_variable_elimination(aux);
   disable_bvarith_elimination(aux);
-  code = assert_formulas(aux, delayed_assertions.size, delayed_assertions.data);
+  code = assert_formulas(aux, assertions.top, assertions.data);
   if (code < 0) {
     print_internalization_code(code);
   } else {
@@ -3127,7 +3185,7 @@ static void yices_export_cmd(const char *s) {
     if (efmode) {
       export_ef_problem(s);
     } else if (mode == CTX_MODE_ONECHECK) {
-      export_delayed_assertions(s);
+      export_assertions(s);
     } else {
       assert(context != NULL && (context->logic == NONE || context->logic == QF_BV));
       if (context_status(context) == STATUS_IDLE) {
@@ -3160,7 +3218,7 @@ static void yices_show_implicant_cmd(void) {
     report_error("(show-implicant) is not supported. Use --mode=one-shot");
   } else if (context_has_model("show-implicant")) {
     yices_init_term_vector(&v);
-    code = yices_implicant_for_formulas(model, delayed_assertions.size, delayed_assertions.data, &v);
+    code = yices_implicant_for_formulas(model, assertions.top, assertions.data, &v);
     if (code < 0) {
       report_show_implicant_error(yices_error_code());
     } else {
@@ -3665,6 +3723,21 @@ static void eval_show_unsat_assumptions_cmd(tstack_t *stack, stack_elem_t *f, ui
 
 
 /*
+ * [show-reduced-model]
+ */
+static void check_show_reduced_model_cmd(tstack_t *stack, stack_elem_t *f, uint32_t n) {
+  check_op(stack, SHOW_REDUCED_MODEL_CMD);
+  check_size(stack, n == 0);
+}
+
+static void eval_show_reduced_model_cmd(tstack_t *stack, stack_elem_t *f, uint32_t n) {
+  yices_show_reduced_model_cmd();
+  tstack_pop_frame(stack);
+  no_result(stack);
+}
+
+
+/*
  * Initialize the term stack and add these commands
  */
 static void init_yices_tstack(tstack_t *stack) {
@@ -3696,6 +3769,8 @@ static void init_yices_tstack(tstack_t *stack) {
   tstack_add_op(stack, CHECK_ASSUMING_CMD, false, eval_check_assuming_cmd, check_check_assuming_cmd);
   tstack_add_op(stack, SHOW_UNSAT_CORE_CMD, false, eval_show_unsat_core_cmd, check_show_unsat_core_cmd);
   tstack_add_op(stack, SHOW_UNSAT_ASSUMPTIONS_CMD, false, eval_show_unsat_assumptions_cmd, check_show_unsat_assumptions_cmd);
+
+  tstack_add_op(stack, SHOW_REDUCED_MODEL_CMD, false, eval_show_reduced_model_cmd, check_show_reduced_model_cmd);
 
   tstack_add_op(stack, DUMP_CMD, false, eval_dump_cmd, check_dump_cmd);
 }
@@ -3753,7 +3828,7 @@ int yices_main(int argc, char *argv[]) {
   context = NULL;
   model = NULL;
   init_parameter_name_table();
-  init_ivector(&delayed_assertions, 10);
+  init_simple_istack(&assertions);
   init_yices_tstack(&stack);
   init_ef_client(&ef_client_globals);
   init_labeled_assertion_stack(&labeled_assertions);
@@ -3826,7 +3901,7 @@ int yices_main(int argc, char *argv[]) {
   }
   delete_labeled_assertion_stack(&labeled_assertions);
   delete_tstack(&stack);
-  delete_ivector(&delayed_assertions);
+  delete_simple_istack(&assertions);
   if (tracer != NULL) {
     delete_trace(tracer);
     safe_free(tracer);

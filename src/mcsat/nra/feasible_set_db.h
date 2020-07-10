@@ -23,6 +23,7 @@
 
 #include "mcsat/variable_db.h"
 #include "mcsat/mcsat_types.h"
+#include "mcsat/value.h"
 
 typedef struct nra_plugin_s nra_plugin_t;
 
@@ -53,7 +54,7 @@ void feasible_set_db_push(feasible_set_db_t* db);
 void feasible_set_db_pop(feasible_set_db_t* db);
 
 /** Get the reason for a conflict on x. Feasible set of x should be empty. */
-void feasible_set_db_get_conflict_reasons(feasible_set_db_t* db, nra_plugin_t* nra, variable_t x, ivector_t* reasons_out, ivector_t* lemma_reasons_out);
+void feasible_set_db_get_conflict_reasons(feasible_set_db_t* db, nra_plugin_t* nra, variable_t x, const mcsat_value_t* x_value, ivector_t* reasons_out, ivector_t* lemma_reasons_out);
 
 /** Return any fixed variables */
 variable_t feasible_set_db_get_fixed(feasible_set_db_t* db);
@@ -69,3 +70,6 @@ variable_t feasible_set_db_get_cheap_unassigned(feasible_set_db_t* db, lp_value_
 
 /** Marks all the top level reasons */
 void feasible_set_db_gc_mark(feasible_set_db_t* db, gc_info_t* gc_vars);
+
+/** Get an interval approximation of the value */
+void feasible_set_db_approximate_value(feasible_set_db_t* db, variable_t constraint_var, lp_interval_t* result);

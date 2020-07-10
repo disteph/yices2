@@ -789,6 +789,7 @@ term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
 
   case EQ_TERM:
   case OR_TERM:
+  case XOR_TERM:
   case BV_EQ_ATOM:
   case BV_GE_ATOM:
   case BV_SGE_ATOM:

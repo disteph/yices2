@@ -364,6 +364,9 @@ typedef enum tstack_error_s {
   TSTACK_BVLOGIC_ERROR,
   TSTACK_TYPE_ERROR_IN_DEFTERM,
   TSTACK_STRINGS_ARE_NOT_TERMS,  // this can be raised only in the SMT2 lib context
+  TSTACK_VARIABLES_VALUES_NOT_MATCHING,
+  TSTACK_NOT_A_CONSTANT,
+  TSTACK_NOT_A_VARIABLE,
   TSTACK_YICES_ERROR,
 } tstack_error_t;
 
@@ -539,6 +542,12 @@ extern void tstack_reset(tstack_t *stack);
  * Delete all
  */
 extern void delete_tstack(tstack_t *stack);
+
+
+/*
+ * Free all the internal buffers
+ */
+extern void tstack_reset_buffers(tstack_t *stack);
 
 
 /*

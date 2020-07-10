@@ -477,7 +477,27 @@ bool bv_evaluator_run_atom(bv_evaluator_t* eval, term_t t, uint32_t* eval_level)
     return atom_value;
   }
 
-  if (t_kind == UNINTERPRETED_TERM || t_kind == ITE_TERM || t_kind == ITE_SPECIAL || t_kind == APP_TERM) {
+  bool is_variable = false;
+  switch (t_kind) {
+  case UNINTERPRETED_TERM:
+  case ITE_TERM:
+  case ITE_SPECIAL:
+  case APP_TERM:
+    is_variable = true;
+    break;
+  case EQ_TERM: {
+    term_t lhs = eq_term_desc(terms, t)->arg[0];
+    if (!is_boolean_term(terms, lhs) && !is_bitvector_term(terms, lhs)) {
+      is_variable = true;
+    }
+    break;
+  }
+  default:
+    is_variable = false;
+    break;
+  }
+
+  if (is_variable) {
     // Get the value from trail
     variable_t t_x = variable_db_get_variable_if_exists(eval->ctx->var_db, t);
     assert(t_x != variable_null);
@@ -510,6 +530,23 @@ bool bv_evaluator_run_atom(bv_evaluator_t* eval, term_t t, uint32_t* eval_level)
       if (level_i > *eval_level) { *eval_level = level_i; }
       if (t_i_pos != t_i) { value_i = !value_i; }
       if (value_i) atom_value = true;
+    }
+    bv_evaluator_set_atom_cache(eval, t, atom_value, *eval_level);
+    return atom_value;
+  }
+
+  if (t_kind == XOR_TERM) {
+    *eval_level = 0;
+    atom_value = false;
+    composite_term_t* t_comp = xor_term_desc(terms, t);
+    for (uint32_t i = 0; i < t_comp->arity; ++ i) {
+      term_t t_i = t_comp->arg[i];
+      term_t t_i_pos = unsigned_term(t_i);
+      uint32_t level_i = 0;
+      bool value_i = bv_evaluator_run_atom(eval, t_i_pos, &level_i);
+      if (level_i > *eval_level) { *eval_level = level_i; }
+      if (t_i_pos != t_i) { value_i = !value_i; }
+      if (value_i) atom_value = !atom_value;
     }
     bv_evaluator_set_atom_cache(eval, t, atom_value, *eval_level);
     return atom_value;
@@ -610,6 +647,8 @@ void bv_evaluator_csttrail_construct(bv_csttrail_t* csttrail, plugin_context_t* 
   csttrail->ctx = ctx;
   csttrail->wlm = wlm;
   csttrail->eval = eval;
+  csttrail->conflict_var = variable_null;
+  csttrail->conflict_var_term = NULL_TERM;
   init_int_hset(&csttrail->free_var, 0);
   init_int_hmap2(&csttrail->fv_cache, 0);
 }
@@ -852,8 +891,10 @@ uint32_t bv_evaluator_not_free_up_to(bv_csttrail_t* csttrail, term_t u) {
   case BV_CONSTANT:
   case BV64_CONSTANT:
     assert(false); // Already treated above
+    break;
   case EQ_TERM:
   case OR_TERM:
+  case XOR_TERM:
   case BV_EQ_ATOM:
   case BV_GE_ATOM:
   case BV_SGE_ATOM:
