@@ -220,7 +220,7 @@ term_t arith_eq0_raw(term_manager_t* tm, term_t t) {
     bvarith_buffer_prepare(buffer, w); // Setting the desired width
     for (uint32_t i = 0; i < t_poly->nterms; ++ i) {
       term_t monom_var = t_poly->mono[i].var;
-      if (bvconst_tst_bit(t_poly->mono[i].coeff, w-1)) { // coefficient is positive
+      if (!bvconst_tst_bit(t_poly->mono[i].coeff, w-1)) { // coefficient is positive
         if (monom_var == const_idx) // constant coefficient gets aded to the buffer bv_poly
           bvarith_buffer_add_const(buffer, t_poly->mono[i].coeff);
         else // Otherwise we add the w-bit monomial to the bv_poly
@@ -231,7 +231,7 @@ term_t arith_eq0_raw(term_manager_t* tm, term_t t) {
     bvarith_buffer_prepare(buffer, w); // Setting the desired width
     for (uint32_t i = 0; i < t_poly->nterms; ++ i) {
       term_t monom_var = t_poly->mono[i].var;
-      if (!bvconst_tst_bit(t_poly->mono[i].coeff, w-1)) { // coefficient is negative
+      if (bvconst_tst_bit(t_poly->mono[i].coeff, w-1)) { // coefficient is negative
         bvconstant_t coeff;
         init_bvconstant(&coeff);
         bvconstant_copy(&coeff, w, t_poly->mono[i].coeff);
@@ -253,7 +253,7 @@ term_t arith_eq0_raw(term_manager_t* tm, term_t t) {
     // Now going into each monomial
     for (uint32_t i = 0; i < t_poly->nterms; ++ i) {
       term_t monom_var = t_poly->mono[i].var;
-      if (tst_bit64(t_poly->mono[i].coeff, w-1)) { // coefficient is positive
+      if (!tst_bit64(t_poly->mono[i].coeff, w-1)) { // coefficient is positive
         if (monom_var == const_idx) // constant coefficient gets added to the buffer bv_poly
           bvarith64_buffer_add_const(buffer, t_poly->mono[i].coeff);
         else // Otherwise we add the w-bit monomial to the bv_poly
@@ -264,7 +264,7 @@ term_t arith_eq0_raw(term_manager_t* tm, term_t t) {
     bvarith64_buffer_prepare(buffer, w); // Setting the desired width
     for (uint32_t i = 0; i < t_poly->nterms; ++ i) {
       term_t monom_var = t_poly->mono[i].var;
-      if (!tst_bit64(t_poly->mono[i].coeff, w-1)) { // coefficient is negative
+      if (tst_bit64(t_poly->mono[i].coeff, w-1)) { // coefficient is negative
         if (monom_var == const_idx)
           bvarith64_buffer_add_const(buffer, - t_poly->mono[i].coeff); // constant coefficient gets added to the buffer bv_poly
         else

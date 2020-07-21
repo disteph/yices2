@@ -68,10 +68,11 @@ void bv_evaluator_clear_cache(bv_evaluator_t* evaluator);
 const mcsat_value_t* bv_evaluator_evaluate_var(bv_evaluator_t* evaluator, variable_t cstr, uint32_t* cstr_eval_level);
 
 /**
- * Evaluate a BV constraint (atom), return the value (true/false) and set
- * the cstr_eval_level to the lowest level where the constraint still
- * evaluates.
+ * Evaluate a Boolean term (resp. any term), return the value true/false (resp. mcsat value) and set
+ * the cstr_eval_level to the lowest level where the constraint still evaluates.
  */
+
+bool bv_evaluator_evaluate_bool(bv_evaluator_t* evaluator, term_t cstr_term, uint32_t* cstr_eval_level);
 const mcsat_value_t* bv_evaluator_evaluate_term(bv_evaluator_t* evaluator, term_t cstr, uint32_t* cstr_eval_level);
 
 /**
@@ -85,7 +86,7 @@ typedef struct bv_csttrail_s {
   bv_evaluator_t* eval;
   
   // bv variables of the conflict that have values on the trail
-  int_hset_t free_var;
+  int_hmap_t free_var;
 
   // hashmap: maps pair (term t, term x) to the greatest number of lower bits of t that could be evaluated without having a value for x.
   // if x is not a (direct) free var of t, then the value is either the bitsize of t, or MAX_INT in the special case the term has no variables at all

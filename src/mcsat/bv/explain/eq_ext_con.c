@@ -825,10 +825,7 @@ term_t term_is_ext_con(eq_ext_con_t* exp, term_t u, bool assume_fragment) {
       }
       return not_term(terms,term_is_ext_con(exp, not_term(terms,t), true));
     }
-    variable_db_t* var_db = ctx->var_db; // standard abbreviations
-    variable_t var        = variable_db_get_variable_if_exists(var_db, t); // term as a variable
-    if (var != variable_null
-        && int_hset_member(&exp->csttrail.free_var, var )) { // t is a variable other than y
+    if (int_hmap_find(&exp->csttrail.free_var, t) != NULL) { // t is a variable other than y
       int_hmap_add(&exp->cache, t, t);
       if (ctx_trace_enabled(ctx, "mcsat::bv::slicing::detect")) {
         FILE* out = ctx_trace_out(ctx);

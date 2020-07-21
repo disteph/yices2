@@ -624,13 +624,18 @@ const mcsat_value_t* bv_evaluator_evaluate_var(bv_evaluator_t* evaluator, variab
   bv_evaluator_clear_cache(evaluator);
 }
 
+bool bv_evaluator_evaluate_bool(bv_evaluator_t* evaluator, term_t cstr_term, uint32_t* cstr_eval_level) {
+  assert (term_type_kind(evaluator->ctx->terms, cstr_term) == BOOL_TYPE);
+  bv_evaluator_clear_cache(evaluator);
+  bool negated = is_neg_term(cstr_term);
+  cstr_term = unsigned_term(cstr_term);
+  bool result = bv_evaluator_run_atom(evaluator, cstr_term, cstr_eval_level);
+  return negated ? !result : result;
+}
+
 const mcsat_value_t* bv_evaluator_evaluate_term(bv_evaluator_t* evaluator, term_t cstr_term, uint32_t* cstr_eval_level) {
   if (term_type_kind(evaluator->ctx->terms, cstr_term) == BOOL_TYPE) {
-    bv_evaluator_clear_cache(evaluator);
-    bool negated = is_neg_term(cstr_term);
-    cstr_term = unsigned_term(cstr_term);
-    bool result = bv_evaluator_run_atom(evaluator, cstr_term, cstr_eval_level);
-    if (negated) { result = !result; }
+    bool result = bv_evaluator_evaluate_bool(evaluator, cstr_term, cstr_eval_level);
     return result ? &mcsat_value_true : &mcsat_value_false;
   } else {
     bv_evaluator_clear_cache(evaluator);
@@ -649,13 +654,13 @@ void bv_evaluator_csttrail_construct(bv_csttrail_t* csttrail, plugin_context_t* 
   csttrail->eval = eval;
   csttrail->conflict_var = variable_null;
   csttrail->conflict_var_term = NULL_TERM;
-  init_int_hset(&csttrail->free_var, 0);
+  init_int_hmap(&csttrail->free_var, 0);
   init_int_hmap2(&csttrail->fv_cache, 0);
 }
 
 // Destruct it
 void bv_evaluator_csttrail_destruct(bv_csttrail_t* csttrail){
-  delete_int_hset(&csttrail->free_var);
+  delete_int_hmap(&csttrail->free_var);
   delete_int_hmap2(&csttrail->fv_cache);
 }
 
@@ -663,7 +668,7 @@ void bv_evaluator_csttrail_destruct(bv_csttrail_t* csttrail){
 void bv_evaluator_csttrail_reset(bv_csttrail_t* csttrail, variable_t conflict_var, uint32_t optim){
   csttrail->conflict_var = conflict_var;
   csttrail->conflict_var_term = variable_db_get_term(csttrail->ctx->var_db, conflict_var);
-  int_hset_reset(&csttrail->free_var);
+  int_hmap_reset(&csttrail->free_var);
   csttrail->optim = optim;
 }
 
@@ -684,7 +689,10 @@ void bv_evaluator_csttrail_scan(bv_csttrail_t* csttrail, variable_t atom){
         variable_db_print_variable(ctx->var_db, var, out);
         fprintf(out, "\n");
       }
-      int_hset_add(&csttrail->free_var, var);
+      term_t var_term = variable_db_get_term(ctx->var_db, var);
+      if (int_hmap_find(&csttrail->free_var, var_term) == NULL) {
+        int_hmap_add(&csttrail->free_var, var_term, 1);
+      }
     }
   }
 }
@@ -783,7 +791,6 @@ uint32_t var_sig(term_t t){
 uint32_t bv_evaluator_not_free_up_to(bv_csttrail_t* csttrail, term_t u) {
 
   plugin_context_t* ctx = csttrail->ctx;
-  variable_db_t* var_db = ctx->var_db; // standard abbreviations
   term_table_t* terms   = ctx->terms;
   term_t t              = unsigned_term(bv_bitterm(terms,u));
   term_t y              = csttrail->conflict_var_term;
@@ -830,7 +837,7 @@ uint32_t bv_evaluator_not_free_up_to(bv_csttrail_t* csttrail, term_t u) {
   }
   }
 
-  uint32_t w     = bv_term_bitsize(terms, t);
+  uint32_t w = bv_term_bitsize(terms, t);
 
   if (visited != NULL){
     if (visited->val == 0) // The term has no variables at all (maybe doesn't happen in yices)
@@ -846,12 +853,7 @@ uint32_t bv_evaluator_not_free_up_to(bv_csttrail_t* csttrail, term_t u) {
   }
 
   // Is t a variable different than y?
-  variable_t var = variable_db_get_variable_if_exists(var_db, t); // term as a variable
-
-  // If ((var != variable_null) && int_hset_member(&csttrail->free_var, var))
-  // then t is another variable than y; it has variables and we don't look into its structure.
-  if (var != variable_null
-      && int_hset_member(&csttrail->free_var, var)) { // t is a variable other than y
+  if (int_hmap_find(&csttrail->free_var, t) != NULL) { // t is a variable other than y
     if (ctx_trace_enabled(ctx, "mcsat::bv::scan")) {
       FILE* out = ctx_trace_out(ctx);
       fprintf(out, "This term is a free variable of the conflict with a value on the trail: ");
