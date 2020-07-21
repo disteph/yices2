@@ -88,7 +88,10 @@ static inline void freeval(arith_t* exp) {
        current = ptr_hmap_next_record(&exp->coeff_cache, current)) {
     safe_free((polypair_t*) current->val);
   }
-  // Now we destruct all intervals
+}
+
+// Now we destruct all intervals
+static inline void free_intervals(arith_t* exp) {
   for (uint32_t i = 0; i < exp->number_constraints; i++) {
     if (exp->intervals[i] != NULL)
       interval_destruct(exp->intervals[i]);
@@ -1607,6 +1610,8 @@ void bvarith_explain(bv_subexplainer_t* this,
     }
   }
   
+  free_intervals(exp);
+
   if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
     FILE* out = ctx_trace_out(ctx);
     fprintf(out, "Returned reasons are:\n");
@@ -1908,7 +1913,9 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
   exp->number_constraints = i;
   delete_ivector(&simplified);
 
-  return (all_good || wild_card);
+  bool result = all_good || wild_card;
+  if (!result) free_intervals(exp);
+  return result;
 }
 
 static
@@ -1957,6 +1964,6 @@ bv_subexplainer_t* arith_new(plugin_context_t* ctx, watch_list_manager_t* wlm, b
   init_ptr_hmap(&exp->coeff_cache, 0);
   init_ptr_hmap(&exp->term_constraints, 0);
   init_ivector(&exp->non_singletons, 0);
-  
+
   return (bv_subexplainer_t*) exp;
 }
