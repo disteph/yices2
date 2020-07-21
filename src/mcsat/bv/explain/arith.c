@@ -1519,8 +1519,6 @@ void bvarith_explain(bv_subexplainer_t* this,
       substitution_destruct(&subst);
     } else {
   
-      // Each constraint from reasons_in will be translated into 1 forbidden interval
-      // We keep them in an array of the same size as reasons_in
       uint32_t n = exp->number_constraints;
       assert(n!=0);
       interval_t** intervals = exp->intervals;
@@ -1660,9 +1658,11 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
     fprintf(out, "\n");
   }
 
+  // We first simplify the conflict
   ivector_t simplified;
   init_ivector(&simplified, conflict_core->size);
   conflict_reduce(exp, conflict_core, &simplified);
+
   if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
     FILE* out = ctx_trace_out(ctx);
     fprintf(out, "Simplified conflict is:\n");
@@ -1671,16 +1671,22 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
       ctx_trace_term(ctx, simplified.data[i]);
     }
   }
-  bool all_good  = true;  // whether all the (simplified) constraints are in the fragment
-  bool wild_card = false; // whether one of the constraints leaves exactly 1 possibility
+  
+  bool all_good  = true;  // whether all the (simplified) constraints so far are in the fragment
+  bool wild_card = false; // whether the conflict can definitely be handled,
+  // regardless of the constraints that aren't yet scanned; this happens if 
+  // one of the constraints scanned so far either (a) is the constant false or (b) is understood
+  // by the explainer to leave exactly 1 feasible value for the conflict variable
 
+  exp->number_constraints = simplified.size;
   exp->intervals = safe_malloc((simplified.size)*sizeof(interval_t*));
-  interval_t** intervals = exp->intervals;
-  term_t atom_term;
-  bool atom_value;
-  uint32_t i = 0;
-  // We go through the reduced conflict
-  for (; i < simplified.size; i++) {
+  interval_t** intervals = exp->intervals; // abbreviation
+
+  // We go through the simplified conflict
+  // variables that will change with every iteration of the constraint scan
+  term_t atom_term; // atom of the constraint
+  bool atom_value;  // truth value of that constraint
+  for (uint32_t i = 0; i < simplified.size; i++) {
     
     // Atom: its term and value
     atom_term  = unsigned_term(simplified.data[i]);
@@ -1700,24 +1706,24 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
       ctx_trace_term(ctx, csttrail->conflict_var_term);
     }
 
-    if (atom_term == true_term) {
-      if (atom_value) {
-        intervals[i] = NULL;
-        continue;
-      }
-      else {
+    if (atom_term == true_term) { // Constraint is the constant true or false
+      if (!atom_value) { // Constraint is the constant false, this is a wild card of type (a)
         wild_card = true;
-        exp->is_inconsistent = true;
-        break;
+        exp->is_inconsistent = true; // recording that it is of type (a)
       }
+      intervals[i] = NULL; // No interval to record
+      continue; // Go to next constraint
     }
 
-    if (wild_card) {
-      intervals[i] = NULL;
-      ivector_push(&exp->non_singletons, simplified.data[i]);
-      continue;
+    // Constraint is not a Boolean constant
+    if (wild_card) { // If a wild card has already been found
+      intervals[i] = NULL; // ...no need to analyse the present constraint
+      if (!exp->is_inconsistent) // but we record it unless the wild_card is of type (a)
+        ivector_push(&exp->non_singletons, simplified.data[i]);
+      continue; // Go to next constraint
     }
     
+    // Constraint is not a Boolean constant and no wild card has yet been found: we analyse it
     term_kind_t kind = term_kind(terms, atom_term);
     term_t t0;
     term_t t1;
@@ -1747,7 +1753,7 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
           ctx_trace_term(ctx, atom_term);
         }
         constraint_good = false;
-        break;
+        break; // exit the switch
       }
       if (p1 == NULL) {
         // Turns out we actually can't deal with the constraint. We stop
@@ -1758,7 +1764,7 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
           ctx_trace_term(ctx, atom_term);
         }
         constraint_good = false;
-        break;
+        break; // exit the switch
       }
       term_t var0 = p0->var;
       term_t var1 = p1->var;
@@ -1785,7 +1791,7 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
           fprintf(out, "Unevaluable monomials are different");
         }
         constraint_good = false;
-        break;
+        break; // exit the switch
       }
       if ( (kind != EQ_TERM)
            && (kind != BV_EQ_ATOM)
@@ -1798,9 +1804,9 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
           ctx_trace_term(ctx, atom_term);
         }
         constraint_good = false;
-        break;
+        break; // exit the switch
       }
-      break;
+      break; // exit the switch
     }
     case BIT_TERM: {
       assert(is_pos_term(bit_term_arg(terms, atom_term)));
@@ -1836,7 +1842,6 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
         ctx_trace_term(ctx, atom_term);
       }
       constraint_good = false;
-      break;
     }
     }
     
@@ -1883,7 +1888,8 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
       }
       if (intervals[i] != NULL){
         transform_interval(exp, &intervals[i]);
-        if (   (!wild_card)
+        if (      intervals[i] != NULL
+               && (!wild_card)
                && (!is_propagation)
                && (interval_get_bitwidth(intervals[i])
                    == bv_term_bitsize(terms, csttrail->conflict_var_term))) {
@@ -1910,7 +1916,6 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
     }
   }
 
-  exp->number_constraints = i;
   delete_ivector(&simplified);
 
   bool result = all_good || wild_card;
