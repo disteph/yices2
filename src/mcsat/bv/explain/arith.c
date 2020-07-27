@@ -1253,11 +1253,11 @@ void bvarith_explain(bv_subexplainer_t* this,
       substitution_add(&subst, exp->norm.csttrail.conflict_var_term, substitution);
       term_t substituted;
       uint32_t eval_level = 0;
-      bool value;
+      const mcsat_value_t* value;
       for (uint32_t i = 0; i < exp->non_singletons.size; i++) {
         substituted = substitution_run_fwd(&subst, exp->non_singletons.data[i], &exp->norm.csttrail.free_var);
-        value = bv_evaluator_evaluate_bool(exp->super.eval, substituted, &eval_level);
-        if (!value) {
+        value = bv_evaluator_evaluate_term(exp->super.eval, substituted, &eval_level);
+        if (value == &mcsat_value_false) {
           ivector_push(reasons_out, not_term(terms,substituted));
           break;
         }
