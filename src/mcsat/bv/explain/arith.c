@@ -1174,9 +1174,11 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in, ivector_t* reaso
 
   bv_csttrail_t* csttrail = &exp->norm.csttrail;
   plugin_context_t* ctx   = csttrail->ctx;
+  term_table_t* terms     = ctx->terms;
+
+  (void) terms;
   
   // Standard abbreviations
-  term_table_t* terms        = ctx->terms;
   const mcsat_trail_t* trail = ctx->trail;
 
   uint32_t n = reasons_in->size;
