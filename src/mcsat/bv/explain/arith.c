@@ -20,6 +20,7 @@
 
 #include "mcsat/tracing.h"
 #include "mcsat/value.h"
+#include "mcsat/utils/substitution.h"
 #include "terms/bvarith_buffer_terms.h"
 #include "terms/bvarith64_buffer_terms.h"
 #include "terms/bv_constants.h"
@@ -68,6 +69,21 @@ typedef struct arith_s {
   // Cache of polynomial analyses (function bv_arith_coeff below): for a (normalised) term t (the key), the value is the polypair_t resulting from analysing t
   ptr_hmap_t coeff_cache;
 
+  bool is_inconsistent; // Whether the simplified conflict contains false
+  
+  uint32_t number_constraints; // Number of conflict constraints (after simplification)
+  interval_t** intervals; // Where we store the forbidden intervals corresponding to the conflict's constraints
+  // The size is number_constraints
+
+  // If one of the intervals is of the form [lo,hi[ with (hi+1 = lo) in the model
+  // (i.e. the only non-forbidden value is the value of hi in the model)
+  // then we record the first such interval found:
+  interval_t* wild_card;
+  // This is NULL if no such interval is found
+
+  // Literals amongst simplified conflict that are NOT the first one whose corresponding interval is of the form above. All literals of the conflict, if not such interval is found.
+  ivector_t non_singletons;
+
 } arith_t;
 
 // coeff_cache has dynamically allocated values
@@ -80,6 +96,12 @@ static inline void freeval(arith_t* exp) {
        current = ptr_hmap_next_record(&exp->coeff_cache, current)) {
     safe_free((polypair_t*) current->val);
   }
+  // Now we destruct all intervals
+  for (uint32_t i = 0; i < exp->number_constraints; i++) {
+    if (exp->intervals[i] != NULL)
+      interval_destruct(exp->intervals[i]);
+  }
+  safe_free(exp->intervals);
 }
 
 // Function returns the polypair_t (variable, coefficient, polyrest) of (normalised) u
@@ -1135,6 +1157,49 @@ void transform_interval(arith_t* exp, interval_t** interval) {
   }
 }
 
+// The following function normalises a conflict
+static
+void add_constraint(plugin_context_t* ctx, term_t t, bool v, ivector_t* reasons_out) {
+  assert(is_boolean_term(ctx->terms, t));
+  term_t constraint = v ? t : not_term(ctx->terms,t);
+  ivector_push(reasons_out, constraint);
+}
+
+// The following function normalises a conflict
+static
+void conflict_reduce(arith_t* exp, const ivector_t* reasons_in, ivector_t* reasons_out) {
+
+  bv_csttrail_t* csttrail = &exp->norm.csttrail;
+  plugin_context_t* ctx   = csttrail->ctx;
+  
+  // Standard abbreviations
+  term_table_t* terms        = ctx->terms;
+  const mcsat_trail_t* trail = ctx->trail;
+
+  uint32_t n = reasons_in->size;
+  assert(n!=0);
+
+  // Variables that are going to be re-used for every item in reasons_in
+  variable_t atom_i_var;
+  bool       atom_i_value;
+  term_t     atom_i_term;
+
+  // We go through reasons_in
+  for (uint32_t i = 0; i < n; i++) {
+    atom_i_var   = reasons_in->data[i];
+    atom_i_value = trail_get_boolean_value(trail, atom_i_var);
+    atom_i_term  = variable_db_get_term(ctx->var_db, atom_i_var);
+
+    assert(good_term(terms,atom_i_term) && is_pos_term(atom_i_term));
+    assert(is_boolean_term(terms, atom_i_term));
+
+    // We first scan the atom (collecting free variables and co.)
+    bv_evaluator_csttrail_scan(csttrail, atom_i_var);
+
+    add_constraint(ctx, atom_i_term, atom_i_value, reasons_out);
+  }
+
+}
 
 static
 void bvarith_explain(bv_subexplainer_t* this,
@@ -1155,176 +1220,153 @@ void bvarith_explain(bv_subexplainer_t* this,
   term_manager_t* tm         = ctx->tm;
   assert(exp->norm.csttrail.conflict_var == var); 
 
-  // Each constraint from reasons_in will be translated into 1 forbidden interval
-  // We keep them in an array of the same size as reasons_in
-  uint32_t n = reasons_in->size;
-  assert(n!=0);
-  interval_t* intervals[n];
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "\nStarted function bvarith_explain, intervals having been created.\n");
+  }
 
   // Variables that are going to be re-used for every item in reasons_in
   variable_t atom_i_var;
-  bool       atom_i_value;
   term_t     atom_i_term;
+  bool       atom_i_value;
 
-  // We go through reasons_in
-  for (uint32_t i = 0; i < n; i++) {
-    
+  // reasons_out always contain reasons_in
+  for (uint32_t i = 0; i < reasons_in->size; i++) {
     atom_i_var   = reasons_in->data[i];
-    atom_i_value = trail_get_boolean_value(trail, atom_i_var);
     atom_i_term  = variable_db_get_term(ctx->var_db, atom_i_var);
-
-    assert(good_term(terms,atom_i_term) && is_pos_term(atom_i_term));
-    assert(is_boolean_term(terms, atom_i_term));
-    
-    if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-      FILE* out = ctx_trace_out(ctx);
-      fprintf(out, "\nbv_arith treats core constraint (%s): ",atom_i_value?"T":"F");
-      ctx_trace_term(ctx, atom_i_term);
-    }
-
-    // reasons_out always contains reasons_in:
+    atom_i_value = trail_get_boolean_value(trail, atom_i_var);
     ivector_push(reasons_out, atom_i_value?atom_i_term:not_term(terms, atom_i_term));
-
-    term_t t0prime = NULL_TERM;
-    term_t t1prime = NULL_TERM;
-
-    if (term_kind(terms, atom_i_term) == BIT_TERM) {
-      term_t t0 = arith_normalise(&exp->norm, atom_i_term);
-      t0prime = term_extract(tm, t0, 0, 1);
-      t1prime = arith_add_one(tm, arith_zero(tm, 1));
-    } else {
-      composite_term_t* atom_i_comp = composite_term_desc(terms, atom_i_term);
-      assert(atom_i_comp->arity == 2);
-      term_t t0 = atom_i_comp->arg[0];
-      term_t t1 = atom_i_comp->arg[1];
-      assert(is_pos_term(t0));
-      assert(is_pos_term(t1));
-      t0 = arith_normalise(&exp->norm, t0);
-      t1 = arith_normalise(&exp->norm, t1);
-
-      switch (term_kind(terms, atom_i_term)) {
-      case BV_GE_ATOM: {  
-        t0prime = t0;
-        t1prime = t1;
-        break;
-      }
-      case BV_SGE_ATOM: {  // (t0 >=s t1) is equivalent to (t0+2^{w-1} >=u t1+2^{w-1})
-        t0prime = arith_add_half(tm, t0);
-        t1prime = arith_add_half(tm, t1);
-        break;
-      }
-      case EQ_TERM :     
-      case BV_EQ_ATOM: { // equality
-        uint32_t w = term_bitsize(terms, t0);
-        t0prime = arith_zero(tm, w);
-        t1prime = arith_sub(tm, t0, t1);
-        break;
-      }
-      default:
-        assert(false);
-      }
-    }
-    t0prime = arith_normalise(&exp->norm, t0prime);
-    t1prime = arith_normalise(&exp->norm, t1prime);
-    intervals[i] = bv_arith_unit_le(exp, t1prime, t0prime, atom_i_value);
-
-    if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-      FILE* out = ctx_trace_out(ctx);
-      fprintf(out, "explain: created one interval, let's see if it needs transforming\n");
-    }
-    if (intervals[i] != NULL) {
-      transform_interval(exp, &intervals[i]);
-    }
   }
 
-  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-    FILE* out = ctx_trace_out(ctx);
-    fprintf(out, "\nFinished creating the intervals. Here they are before they are sorted:\n");
-    for (uint32_t i = 0; i < n; i++) {
-      fprintf(out, "Scanning interval ");
-      if (intervals[i] == NULL) {
-        fprintf(out, "EMPTY");
-      } else {
-        interval_print(out, ctx->terms, intervals[i]);
-      }
-      fprintf(out, "\n");
-    }
-    fprintf(out, "And now after we sort them:\n");
-  }
+  if (!exp->is_inconsistent) {
 
-  ptr_array_sort2((void**)intervals, n, NULL, interval_cmp); // We sort the intervals  
-  assert(intervals[0] != NULL); // There should be at least one non-empty interval
-  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-    FILE* out = ctx_trace_out(ctx);
-    fprintf(out, "Looking at interval ");
-    interval_print(out, ctx->terms, intervals[0]);
-    fprintf(out, "\n");
-  }
-  uint32_t nonemptys = 1; // Total number of non-empty intervals is about to get computed
-  uint32_t bitwidths = 1; // Total number of distinct bitwidths is about to get computed
-  for (; (nonemptys < n) && (intervals[nonemptys] != NULL); nonemptys++) {
-    if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-      FILE* out = ctx_trace_out(ctx);
-      fprintf(out, "Looking at interval ");
-      interval_print(out, ctx->terms, intervals[nonemptys]);
-      fprintf(out, "\n");
-    }
-    if (interval_get_bitwidth(intervals[nonemptys-1]) != interval_get_bitwidth(intervals[nonemptys])){
-      bitwidths++;
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+    if (exp->wild_card != NULL) {
+      term_t substitution = exp->wild_card->hi_term;
+      term_t hi = arith_add_one(tm, exp->wild_card->hi_term);
+      term_t diff = arith_sub(tm,exp->wild_card->lo_term, hi);
+      term_t substitution_reason = arith_eq0(tm, diff);
+      ivector_push(reasons_out, substitution_reason);
+      ivector_add(reasons_out, exp->wild_card->reasons.data, exp->wild_card->reasons.size);
+
+      substitution_t subst;
+      substitution_construct(&subst, tm, ctx->tracer);
+      substitution_add(&subst, exp->norm.csttrail.conflict_var_term, substitution);
+      term_t substituted;
+      uint32_t eval_level = 0;
+      bool value;
+      for (uint32_t i = 0; i < exp->non_singletons.size; i++) {
+        substituted = substitution_run_fwd(&subst, exp->non_singletons.data[i], &exp->norm.csttrail.free_var);
+        value = bv_evaluator_evaluate_bool(exp->super.eval, substituted, &eval_level);
+        if (!value) {
+          ivector_push(reasons_out, not_term(terms,substituted));
+          break;
+        }
+      }
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith::ttt")) {
         FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "Found new bitwidth %"PRId32" (old was %"PRId32")\n",interval_get_bitwidth(intervals[nonemptys]),interval_get_bitwidth(intervals[nonemptys-1]));
-      }
-    }
-  }
-
-  // For each of the bitwidths we have, we record
-  // - the pointer to the first interval pointer that has that bitwidth
-  // - how many intervals we have of that bitwidth
-  interval_t** bitwidth_intervals[bitwidths];
-  uint32_t bitwidth_numbers[bitwidths];
-  bitwidth_intervals[0] = intervals;
-  uint32_t j = 0;
-  uint32_t tmp = 1;
-  for (uint32_t i = 1; i < nonemptys; i++) {
-    if (interval_get_bitwidth(intervals[i-1]) != interval_get_bitwidth(intervals[i])) {
-      bitwidth_numbers[j] = tmp; // We have tmp intervals in the jth bitwidth
-      j++; // Going into the next j
-      bitwidth_intervals[j] = &intervals[i];// First interval of the jth bitwidth is this
-      tmp = 0; // Re-initialising counter for the new bitwidth
-    }
-    tmp++;
-  }
-  bitwidth_numbers[j] = tmp; // We have tmp intervals of the smallest bitwidth
-  
-  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-    FILE* out = ctx_trace_out(ctx);
-    fprintf(out, "\nWe now look at the %"PRId32" forbidden intervals we have collected (of %"PRId32" different bitwidths), which are\n",nonemptys,bitwidths);
-    for (uint32_t j = 0; j < bitwidths; j++) { // Looping on different bitwidths
-      fprintf(out, "%"PRId32" intervals of bitwidth %"PRId32":\n",
-              bitwidth_numbers[j], interval_get_bitwidth(bitwidth_intervals[j][0]));
-      for (uint32_t i = 0; i < bitwidth_numbers[j]; i++) {
-        interval_print(out, ctx->terms, bitwidth_intervals[j][i]);
+        fprintf(out, "We had found 1 interval leaving a singleton for the conflict variable.\n");
+        fprintf(out, "The substitution term is ");
+        ctx_trace_term(ctx, substitution);
+        fprintf(out, "\nThe substituted term that is violated by the model is ");
+        ctx_trace_term(ctx, substituted);
+        fprintf(out, "\nThe substitution reason is ");
+        ctx_trace_term(ctx, substitution_reason);
         fprintf(out, "\n");
       }
-    }
-    fprintf(out, "\n");
-  }
-
-  /* All atoms in reasons_in have been treated, the resulting forbidden intervals for the
-     var have been pushed in the heap. It's now time to look at what's in the heap. */
-
-  ivector_t cover_output; // where the call to cover should place literals
-  init_ivector(&cover_output, 0);
-  cover(exp, &cover_output, bitwidths-1, bitwidth_intervals, bitwidth_numbers, NULL, substitution);
-  ivector_add(reasons_out, cover_output.data, cover_output.size);
-  delete_ivector(&cover_output);
+      substitution_destruct(&subst);
+    } else {
   
-  // Now we destruct all intervals
-  for (uint32_t i = 0; i < nonemptys; i++) {
-    interval_destruct(intervals[i]);
-  }
+      // Each constraint from reasons_in will be translated into 1 forbidden interval
+      // We keep them in an array of the same size as reasons_in
+      uint32_t n = exp->number_constraints;
+      assert(n!=0);
+      interval_t** intervals = exp->intervals;
+  
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+        FILE* out = ctx_trace_out(ctx);
+        fprintf(out, "\nFinished creating the intervals. Here they are before they are sorted:\n");
+        for (uint32_t i = 0; i < n; i++) {
+          fprintf(out, "Interval %d is ",i);
+          if (intervals[i] == NULL) {
+            fprintf(out, "EMPTY");
+          } else {
+            interval_print(out, ctx->terms, intervals[i]);
+          }
+          fprintf(out, "\n");
+        }
+        fprintf(out, "And now after we sort them:\n");
+      }
 
+      ptr_array_sort2((void**)intervals, n, NULL, interval_cmp); // We sort the intervals  
+      assert(intervals[0] != NULL); // There should be at least one non-empty interval
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+        FILE* out = ctx_trace_out(ctx);
+        fprintf(out, "Interval 0 is now ");
+        interval_print(out, ctx->terms, intervals[0]);
+        fprintf(out, "\n");
+      }
+      uint32_t nonemptys = 1; // Total number of non-empty intervals is about to get computed
+      uint32_t bitwidths = 1; // Total number of distinct bitwidths is about to get computed
+      for (; (nonemptys < n) && (intervals[nonemptys] != NULL); nonemptys++) {
+        if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+          FILE* out = ctx_trace_out(ctx);
+          fprintf(out, "Interval %d is now ",nonemptys);
+          interval_print(out, ctx->terms, intervals[nonemptys]);
+          fprintf(out, "\n");
+        }
+        if (interval_get_bitwidth(intervals[nonemptys-1]) != interval_get_bitwidth(intervals[nonemptys])){
+          bitwidths++;
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "Found new bitwidth %"PRId32" (old was %"PRId32")\n",interval_get_bitwidth(intervals[nonemptys]),interval_get_bitwidth(intervals[nonemptys-1]));
+          }
+        }
+      }
+
+      // For each of the bitwidths we have, we record
+      // - the pointer to the first interval pointer that has that bitwidth
+      // - how many intervals we have of that bitwidth
+      interval_t** bitwidth_intervals[bitwidths];
+      uint32_t bitwidth_numbers[bitwidths];
+      bitwidth_intervals[0] = intervals;
+      uint32_t j = 0;
+      uint32_t tmp = 1;
+      for (uint32_t i = 1; i < nonemptys; i++) {
+        if (interval_get_bitwidth(intervals[i-1]) != interval_get_bitwidth(intervals[i])) {
+          bitwidth_numbers[j] = tmp; // We have tmp intervals in the jth bitwidth
+          j++; // Going into the next j
+          bitwidth_intervals[j] = &intervals[i];// First interval of the jth bitwidth is this
+          tmp = 0; // Re-initialising counter for the new bitwidth
+        }
+        tmp++;
+      }
+      bitwidth_numbers[j] = tmp; // We have tmp intervals of the smallest bitwidth
+  
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+        FILE* out = ctx_trace_out(ctx);
+        fprintf(out, "\nWe now look at the %"PRId32" forbidden intervals we have collected (of %"PRId32" different bitwidths), which are\n",nonemptys,bitwidths);
+        for (uint32_t j = 0; j < bitwidths; j++) { // Looping on different bitwidths
+          fprintf(out, "%"PRId32" intervals of bitwidth %"PRId32":\n",
+                  bitwidth_numbers[j], interval_get_bitwidth(bitwidth_intervals[j][0]));
+          for (uint32_t i = 0; i < bitwidth_numbers[j]; i++) {
+            interval_print(out, ctx->terms, bitwidth_intervals[j][i]);
+            fprintf(out, "\n");
+          }
+        }
+        fprintf(out, "\n");
+      }
+
+      /* All atoms in reasons_in have been treated, the resulting forbidden intervals for the
+         var have been collected. It's now time to look at how the cover the domain of feasible values. */
+
+      ivector_t cover_output; // where the call to cover should place literals
+      init_ivector(&cover_output, 0);
+      cover(exp, &cover_output, bitwidths-1, bitwidth_intervals, bitwidth_numbers, NULL, substitution);
+      ivector_add(reasons_out, cover_output.data, cover_output.size);
+      delete_ivector(&cover_output);
+    }
+  }
+  
   if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
     FILE* out = ctx_trace_out(ctx);
     fprintf(out, "Returned reasons are:\n");
@@ -1341,11 +1383,11 @@ void explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_core, v
 }
 
 /**
-   Detection of whether a conflict is within the fragment, and external API
+   Detection of whether a conflict or propagation is within the fragment, and external API
 **/
 
 static
-bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_core, variable_t conflict_var) {
+bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variable_t conflict_var, bool is_propagation) {
   
   // Standard abbreviations
   arith_t* exp            = (arith_t*) this;
@@ -1353,7 +1395,6 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
   plugin_context_t* ctx   = this->ctx;
   term_manager_t* tm      = ctx->tm;
   term_table_t* terms     = ctx->terms;
-  uint32_t result         = true;
   
   // We're facing a new problem, with a trail we don't know
   // We must reset the cache & co.
@@ -1362,45 +1403,92 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
   freeval(exp);
   reset_arith_norm(&exp->norm);
   ptr_hmap_reset(&exp->coeff_cache);
+  ivector_reset(&exp->non_singletons);
+  exp->is_inconsistent     = false;
+  exp->wild_card           = NULL;
   
-  if (ctx_trace_enabled(ctx, "mcsat::bv::arith::count")) {
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
     FILE* out = ctx_trace_out(ctx);
-    fprintf(out, "bv_arith looks at new conflict of size %"PRId32" with conflict variable ",conflict_core->size);
+    fprintf(out, "\nbv_arith looks at new conflict of size %"PRId32" with conflict variable ",conflict_core->size);
     term_t conflict_var_term = variable_db_get_term(ctx->var_db, conflict_var);
     ctx_trace_term(ctx, conflict_var_term);
     fprintf(out, "\n");
   }
 
+  ivector_t simplified;
+  init_ivector(&simplified, conflict_core->size);
+  conflict_reduce(exp, conflict_core, &simplified);
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "Simplified conflict is:\n");
+    for (uint32_t i = 0; i < simplified.size; i++) {
+      fprintf(out,"[%"PRId32"]",i);
+      ctx_trace_term(ctx, simplified.data[i]);
+    }
+  }
+  bool all_good  = true;  // whether all the (simplified) constraints are in the fragment
+  bool wild_card = false; // whether one of the constraints leaves exactly 1 possibility
 
-  // We go through the conflict core
-  for (uint32_t i = 0; i < conflict_core->size; i++) {
-      
-    // Atom and its term
-    variable_t atom_var   = conflict_core->data[i];
-    term_t     atom_term  = variable_db_get_term(ctx->var_db, atom_var);
+  exp->intervals = safe_malloc((simplified.size)*sizeof(interval_t*));
+  interval_t** intervals = exp->intervals;
+  term_t atom_term;
+  bool atom_value;
+  uint32_t i = 0;
+  // We go through the reduced conflict
+  for (; i < simplified.size; i++) {
+    
+    // Atom: its term and value
+    atom_term  = unsigned_term(simplified.data[i]);
+    atom_value = is_pos_term(simplified.data[i]);
 
+    assert(good_term(terms,atom_term));
     assert(is_pos_term(atom_term));
-
+    assert(is_boolean_term(terms, atom_term));
+    
     if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
       FILE* out = ctx_trace_out(ctx);
       fprintf(out, "bv_arith looks at whether constraint %"PRId32" is in the fragment: ",i);
+      ctx_trace_term(ctx, simplified.data[i]);
+      fprintf(out, "in other words ");
       ctx_trace_term(ctx, atom_term);
-      fprintf(out, "with the conflict_variable being ");
+      fprintf(out, "with value %s and conflict_variable ",atom_value?"T":"F");
       ctx_trace_term(ctx, csttrail->conflict_var_term);
     }
 
-    switch (term_kind(terms, atom_term)) {
+    if (atom_term == true_term) {
+      if (atom_value) {
+        intervals[i] = NULL;
+        continue;
+      }
+      else {
+        wild_card = true;
+        exp->is_inconsistent = true;
+        break;
+      }
+    }
+
+    if (wild_card) {
+      intervals[i] = NULL;
+      ivector_push(&exp->non_singletons, simplified.data[i]);
+      continue;
+    }
+    
+    term_kind_t kind = term_kind(terms, atom_term);
+    term_t t0;
+    term_t t1;
+    bool constraint_good = true;
+
+    switch (kind) {
     case EQ_TERM : 
     case BV_EQ_ATOM:
     case BV_GE_ATOM: 
     case BV_SGE_ATOM: {
       composite_term_t* atom_comp = composite_term_desc(terms, atom_term);
       assert(atom_comp->arity == 2);
-      term_t t0 = atom_comp->arg[0];
-      term_t t1 = atom_comp->arg[1];
-      assert(is_pos_term(t0) && is_pos_term(t1));
-      // OK, maybe we can treat the constraint atom_term. We first scan the atom (collecting free variables and co.)
-      bv_evaluator_csttrail_scan(csttrail, atom_var);
+      t0 = atom_comp->arg[0];
+      t1 = atom_comp->arg[1];
+      assert(is_pos_term(t0));
+      assert(is_pos_term(t1));
       
       // Now that we have collected the free variables, we look into the constraint structure
       polypair_t* p0 = bv_arith_coeff(exp, t0, false);
@@ -1413,7 +1501,7 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
           ctx_trace_term(ctx, csttrail->conflict_var_term);
           ctx_trace_term(ctx, atom_term);
         }
-        result = false;
+        constraint_good = false;
         break;
       }
       if (p1 == NULL) {
@@ -1424,7 +1512,7 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
           ctx_trace_term(ctx, csttrail->conflict_var_term);
           ctx_trace_term(ctx, atom_term);
         }
-        result = false;
+        constraint_good = false;
         break;
       }
       term_t var0 = p0->var;
@@ -1451,10 +1539,10 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
           FILE* out = ctx_trace_out(ctx);
           fprintf(out, "Unevaluable monomials are different");
         }
-        result = false;
+        constraint_good = false;
         break;
       }
-      if (t0_coeff * t1_coeff == -1) {
+      if ( t0_coeff * t1_coeff == -1 ) {
         // Turns out we actually can't deal with the constraint. We stop
         if (ctx_trace_enabled(ctx, "mcsat::bv::arith::fail")) {
           FILE* out = ctx_trace_out(ctx);
@@ -1462,15 +1550,13 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
           ctx_trace_term(ctx, csttrail->conflict_var_term);
           ctx_trace_term(ctx, atom_term);
         }
-        result = false;
+        constraint_good = false;
         break;
       }
       break;
     }
     case BIT_TERM: {
       assert(is_pos_term(bit_term_arg(terms, atom_term)));
-      // OK, maybe we can treat the constraint atom_term. We first scan the atom (collecting free variables and co.)
-      bv_evaluator_csttrail_scan(csttrail, atom_var);
       
       // Now that we have collected the free variables, we look into the constraint structure
       polypair_t* p = bv_arith_coeff(exp, term_extract(tm, atom_term, 0, 1), false);
@@ -1482,7 +1568,7 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
           ctx_trace_term(ctx, csttrail->conflict_var_term);
           ctx_trace_term(ctx, atom_term);
         }
-        result = false;
+        constraint_good = false;
         break;
       }
       if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
@@ -1502,18 +1588,95 @@ bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_cor
         fprintf(out, "Can't understand predicate:\n");
         ctx_trace_term(ctx, atom_term);
       }
-      result = false;
+      constraint_good = false;
       break;
     }
     }
+    
+    if (constraint_good) { // then we turn it into an interval
+      term_t t0prime = NULL_TERM;
+      term_t t1prime = NULL_TERM;
+    
+      if (kind == BIT_TERM) {
+        t0 = arith_normalise(&exp->norm, atom_term);
+        t0prime = term_extract(tm, t0, 0, 1);
+        t1prime = arith_add_one(tm, arith_zero(tm, 1));
+      } else {
+        t0 = arith_normalise(&exp->norm, t0);
+        t1 = arith_normalise(&exp->norm, t1);
+
+        switch (kind) {
+        case BV_GE_ATOM: {  
+          t0prime = t0;
+          t1prime = t1;
+          break;
+        }
+        case BV_SGE_ATOM: {  // (t0 >=s t1) is equivalent to (t0+2^{w-1} >=u t1+2^{w-1})
+          t0prime = arith_add_half(tm, t0);
+          t1prime = arith_add_half(tm, t1);
+          break;
+        }
+        case EQ_TERM :     
+        case BV_EQ_ATOM: { // equality
+          uint32_t w = term_bitsize(terms, t0);
+          t0prime = arith_zero(tm, w);
+          t1prime = arith_sub(tm, t0, t1);
+          break;
+        }
+        default: {}
+        }
+      }
+      t0prime = arith_normalise(&exp->norm, t0prime);
+      t1prime = arith_normalise(&exp->norm, t1prime);
+      intervals[i] = bv_arith_unit_le(exp, t1prime, t0prime, atom_value);
+
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+        FILE* out = ctx_trace_out(ctx);
+        fprintf(out, "explain: created one interval, let's see if it needs transforming\n");
+      }
+      if (intervals[i] != NULL){
+        transform_interval(exp, &intervals[i]);
+        if (   (!wild_card)
+               && (!is_propagation)
+               && (interval_get_bitwidth(intervals[i])
+                   == bv_term_bitsize(terms, csttrail->conflict_var_term))) {
+          bvconstant_t length;
+          init_bvconstant(&length);
+          bvconstant_copy(&length, intervals[i]->length.bitsize, intervals[i]->length.data);
+          bvconstant_add_one(&length);
+          bvconstant_normalize(&length);
+          if (bvconstant_is_minus_one(&length)) { // Non-forbidden values are a singleton
+            wild_card = true;
+            exp->wild_card = intervals[i];
+          } else {
+            ivector_push(&exp->non_singletons, simplified.data[i]);
+          }
+          delete_bvconstant(&length);
+        } else {
+          ivector_push(&exp->non_singletons, simplified.data[i]);
+        }
+      }
+    } else {
+      intervals[i] = NULL;
+      all_good = false;
+      ivector_push(&exp->non_singletons, simplified.data[i]);
+    }
   }
-  return result;
+
+  exp->number_constraints = i;
+  delete_ivector(&simplified);
+
+  return (all_good || wild_card);
 }
 
 static
+bool can_explain_conflict(bv_subexplainer_t* this, const ivector_t* reasons, variable_t x) {
+  return can_explain(this, reasons, x, false);
+}
+  
+static
 bool can_explain_propagation(bv_subexplainer_t* this, const ivector_t* reasons, variable_t x) {
-  // Just use the conflict filter
-  return can_explain_conflict(this, reasons, x);
+  return can_explain(this, reasons, x, true);
 }
 
 static
@@ -1531,6 +1694,7 @@ void destruct(bv_subexplainer_t* this) {
   freeval(exp);
   delete_arith_norm(&exp->norm);
   delete_ptr_hmap(&exp->coeff_cache);
+  delete_ivector(&exp->non_singletons);
 }
 
 /** Allocate the sub-explainer and setup the methods */
@@ -1541,14 +1705,15 @@ bv_subexplainer_t* arith_new(plugin_context_t* ctx, watch_list_manager_t* wlm, b
   bv_subexplainer_construct(&exp->super, "mcsat::bv::explain::arith", ctx, wlm, eval);
   bv_evaluator_csttrail_construct(&exp->norm.csttrail, ctx, wlm, eval);
                                 
-  exp->super.can_explain_conflict = can_explain_conflict;
-  exp->super.explain_conflict = explain_conflict;
+  exp->super.can_explain_conflict    = can_explain_conflict;
+  exp->super.explain_conflict        = explain_conflict;
   exp->super.can_explain_propagation = can_explain_propagation;
-  exp->super.explain_propagation = explain_propagation;
-  exp->super.destruct = destruct;
+  exp->super.explain_propagation     = explain_propagation;
+  exp->super.destruct                = destruct;
 
   init_arith_norm(&exp->norm);
   init_ptr_hmap(&exp->coeff_cache, 0);
-
+  init_ivector(&exp->non_singletons, 0);
+  
   return (bv_subexplainer_t*) exp;
 }

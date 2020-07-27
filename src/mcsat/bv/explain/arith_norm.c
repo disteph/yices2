@@ -633,11 +633,7 @@ term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
     fprintf(out, "Not negative Boolean term. Variable on the trail?\n");
   }
 
-  variable_db_t* var_db = ctx->var_db; // standard abbreviations
-  variable_t var        = variable_db_get_variable_if_exists(var_db, t); // term as a variable
-  
-  if (var != variable_null
-      && int_hset_member(&norm->csttrail.free_var, var )) { // t is a variable other than y
+  if (int_hmap_find(&norm->csttrail.free_var, t) != NULL) { // t is a variable other than y
     if (ctx_trace_enabled(ctx, "mcsat::bv::arith::scan")) {
       FILE* out = ctx_trace_out(ctx);
       fprintf(out, "Oh, this is a variable on the trail, we return the extract of: ");
@@ -869,10 +865,11 @@ term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
   }
 
   default: {
-    assert(!is_boolean_term(terms,t));
-    term_t tmp = term_extract(tm, t, 0, w);
-    arith_analyse_t* analysis = arith_analyse(norm, tmp);
-    return finalise(norm, t, analysis);
+    assert(false);
+    /* assert(!is_boolean_term(terms,t)); */
+    /* term_t tmp = term_extract(tm, t, 0, w); */
+    /* arith_analyse_t* analysis = arith_analyse(norm, tmp); */
+    /* return finalise(norm, t, analysis); */
   }
   }
 }

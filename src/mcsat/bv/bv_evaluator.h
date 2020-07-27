@@ -85,7 +85,7 @@ typedef struct bv_csttrail_s {
   bv_evaluator_t* eval;
   
   // bv variables of the conflict that have values on the trail
-  int_hset_t free_var;
+  int_hmap_t free_var;
 
   // hashmap: maps pair (term t, term x) to the greatest number of lower bits of t that could be evaluated without having a value for x.
   // if x is not a (direct) free var of t, then the value is either the bitsize of t, or MAX_INT in the special case the term has no variables at all
