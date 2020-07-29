@@ -71,19 +71,20 @@ typedef struct arith_s {
 
   bool is_inconsistent; // Whether the simplified conflict contains false
   
-  uint32_t number_constraints; // Number of conflict constraints (after simplification)
-  interval_t** intervals; // Where we store the forbidden intervals corresponding to the conflict's constraints
-  // The size is number_constraints
+  /* uint32_t number_constraints; // Number of conflict constraints (after simplification) */
+  /* interval_t** intervals; // Where we store the forbidden intervals corresponding to the conflict's constraints */
+  /* // The size is number_constraints */
+  ivector_t reasons;
 
   // If one of the intervals is of the form [lo,hi[ with (hi+1 = lo) in the model
   // (i.e. the only non-forbidden value is the value of hi in the model)
-  // then we record the first such interval found:
-  interval_t* wild_card;
-  // This is NULL if no such interval is found
+  // then we record (hi+1 = lo) in interval_reasons and substitution is hi:
+  term_t substitution;
+  // This is NULL_term if no such interval is found
 
   // Literals amongst simplified conflict that are NOT the first one whose corresponding interval is of the form above. All literals of the conflict, if not such interval is found.
   ivector_t non_singletons;
-
+  
 } arith_t;
 
 // coeff_cache has dynamically allocated values
@@ -96,15 +97,6 @@ static inline void freeval(arith_t* exp) {
        current = ptr_hmap_next_record(&exp->coeff_cache, current)) {
     safe_free((polypair_t*) current->val);
   }
-}
-
-// Now we destruct all intervals
-static inline void free_intervals(arith_t* exp) {
-  for (uint32_t i = 0; i < exp->number_constraints; i++) {
-    if (exp->intervals[i] != NULL)
-      interval_destruct(exp->intervals[i]);
-  }
-  safe_free(exp->intervals);
 }
 
 // Function returns the polypair_t (variable, coefficient, polyrest) of (normalised) u
@@ -629,6 +621,15 @@ void arith_add2conflict(arith_t* exp,
     ivector_push(conflict, continuity_reason);
   }
 
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "Adding interval's internal reasons:\n");
+    for (uint32_t j = 0; j < i->reasons.size; j++) {
+      fprintf(out,"[%"PRId32"]",j);
+      ctx_trace_term(ctx, i->reasons.data[j]);
+    }
+  }
+
   ivector_add(conflict, i->reasons.data, i->reasons.size);
 }
 
@@ -677,10 +678,15 @@ bool cover(arith_t* exp,
            interval_t*** intervals, // Array of size bitwidths
            uint32_t* numbers,       // Array of size bitwidths
            interval_t* inherited,   // First interval of coverage, can be NULL
-           term_t* substitution     // Term used for substitution of the variable in case of propagation
+           term_t* substitution,    // Secondary output: term used for substitution of the variable
+           bool* abort              // Tertiary output: whether to abort
            ){
   assert(intervals[0] != NULL);
   assert(intervals[0][0] != NULL);
+  assert(!abort[0]);
+  assert(substitution != NULL);
+  assert(abort != NULL);
+  assert(!abort[0]);
   
   plugin_context_t* ctx = exp->super.ctx;
   term_manager_t* tm    = ctx->tm;
@@ -693,13 +699,7 @@ bool cover(arith_t* exp,
 
   if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
     FILE* out = ctx_trace_out(ctx);
-    fprintf(out, "\nCall to cover for a ");
-    if (substitution != NULL) {
-      fprintf(out, "propagation, with ");
-    } else {
-      fprintf(out, "conflict, with ");
-    }
-    fprintf(out, "%"PRId32" intervals of bitwidth %"PRId32":\n",n,w);
+    fprintf(out, "\nCall to cover with %"PRId32" intervals of bitwidth %"PRId32":\n",n,w);
     print_intervals(ctx, intervals[0], n);
     fprintf(out, "Longest one is ");
     interval_print(out, terms, longest);
@@ -784,9 +784,9 @@ bool cover(arith_t* exp,
 
   interval_t* best_so_far = NULL;
   bool notdone = true;
-
+  
   // We loop over all intervals of that bitwidth, starting with the longest.
-  for(uint32_t j = 0; notdone && j <= n; ){
+  for(uint32_t j = 0; notdone && (!abort[0]) && j <= n; ){
 
     interval_t* i = get_interval(intervals[0],inherited,inherited_index,j%n);
 
@@ -866,21 +866,33 @@ bool cover(arith_t* exp,
 
       // First situation: there are no smaller bitwidths
       if (bitwidths == 0) {
-        // The hole had better be of size 1, and we'd better be doing a propagation!
-        assert(substitution != NULL);
-        assert(substitution[0] == NULL_TERM);
+        // We'd better not have already found a substitution!
+        if (substitution[0] != NULL_TERM) {
+          abort[0] = true;
+          break;
+        }
         bvconstant_t saved_hi_copy;
         init_bvconstant(&saved_hi_copy);
         bvconstant_copy(&saved_hi_copy, saved_hi->bitsize, saved_hi->data);
         bvconstant_normalize(&saved_hi_copy);
         bvconstant_add_one(&saved_hi_copy);
         bvconstant_normalize(&saved_hi_copy);
-        assert(bvconstant_eq(&saved_hi_copy,&i->lo));
+        // ... and the hole had better be of size 1
+        if (!bvconstant_eq(&saved_hi_copy,&i->lo))
+          abort[0] = true;
         delete_bvconstant(&saved_hi_copy);
+        if (abort[0]) break;
         // OK, seems fine. We add to the conflict the fact that the hole has size 1:
         term_t literal = arith_eq_norm(&exp->norm, i->lo_term, arith_add_one(tm, saved_hi_term));
-        if (arith_is_no_triv(literal))
+        if (arith_is_no_triv(literal)) {
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "Adding to conflict the fact that hole has size 1: ");
+            term_print_to_file(out, terms, literal);
+            fprintf(out, "\n");
+          }
           ivector_push(output, literal);
+        }
         // We output the term in the substitution pointer
         substitution[0] = saved_hi_term;
         if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
@@ -960,7 +972,8 @@ bool cover(arith_t* exp,
         hole_used = cover(exp, &rec_output,
                           bitwidths-1, &intervals[1], &numbers[1],
                           &hole_complement,
-                          (substitution != NULL && rec_substitution == NULL_TERM) ? &rec_substitution : NULL);
+                          &rec_substitution,
+                          abort);
         interval_delete(&hole_complement);
         delete_bvconstant(&lo_proj);
         delete_bvconstant(&hi_proj);
@@ -972,63 +985,90 @@ bool cover(arith_t* exp,
           fprintf(out, "\nHole is at least as big as the domain of the next bitwidth, we recursively call cover on that whole domain.\n");
         }
         cover(exp, &rec_output, bitwidths-1, &intervals[1], &numbers[1], NULL,
-              (substitution != NULL && rec_substitution == NULL_TERM) ? &rec_substitution : NULL);
+              &rec_substitution,
+              abort);
         hole_used = false;
+        /* if (rec_substitution != NULL_TERM) */
+        /*   abort[0] = true; */
       }
 
-      // Now we analyse what the recursive call returned to us
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "Back to bitwidth %"PRId32"!\n",w);
-      }
-      // If we are explaining a propagation and got a feasible value in the hole:
-      if (substitution != NULL && rec_substitution != NULL_TERM) {
-        term_t diff = arith_sub(tm, rec_substitution, lo_proj_term);
-        substitution[0] = arith_add(tm, lo_term, arith_upextension(tm, diff, false_term, w));
+
+      if (!abort[0]) {
+        // Now we analyse what the recursive call returned to us
         if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
           FILE* out = ctx_trace_out(ctx);
-          fprintf(out, "Hole was from ");
-          term_print_to_file(out, terms, lo_term);
-          fprintf(out, " to ");
-          term_print_to_file(out, terms, hi_term);
-          fprintf(out, " and the only possible value at bitwidth %"PRId32" is ",w);
-          term_print_to_file(out, terms, substitution[0]);
-          fprintf(out, "\n");
+          fprintf(out, "Back to bitwidth %"PRId32"!\n",w);
         }
-      }
-      if (!hole_used && rec_substitution == NULL_TERM) {
-        // If the hole was not used and the recusive call did not output a term,
-        // the intervals of the present bitwith were really useless, we return!
-        if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-          FILE* out = ctx_trace_out(ctx);
-          fprintf(out, "The recursive call covered the hole without our help, we return.\n");
-        }
-        assert(substitution == NULL); // We can't be explaining a propagation
-        ivector_reset(output); // if hole wasn't used, this bitwidth is useless
-        notdone = false;
-        result  = false;
-        saved_hi_term = NULL_TERM;
-      } else {
-        // otherwise we need to push to output that the hole was small
-        if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-          FILE* out = ctx_trace_out(ctx);
-          fprintf(out, "The recursive call used the hole we left uncovered at bitwidth %"PRId32" and/or found 1 feasible value .\n",w);
-        }
-        term_t literal = (hole_used) ?
-          arith_lt_norm(&exp->norm, arith_sub(tm, hi_term, lo_term), smaller_values_term) :
-          arith_le_norm(&exp->norm, arith_sub(tm, hi_term, substitution[0]), smaller_values_term);
-        if (arith_is_no_triv(literal)) {
+        // If we got a feasible value in the hole:
+        if (rec_substitution != NULL_TERM) {
+          term_t diff = arith_sub(tm, rec_substitution, lo_proj_term);
+          substitution[0] = arith_add(tm, lo_term, arith_upextension(tm, diff, false_term, w));
           if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
             FILE* out = ctx_trace_out(ctx);
-            fprintf(out, "The literal is ");
-            term_print_to_file(out, terms, literal);
+            fprintf(out, "Hole was from ");
+            term_print_to_file(out, terms, lo_term);
+            fprintf(out, " to ");
+            term_print_to_file(out, terms, hi_term);
+            fprintf(out, " and the only possible value at bitwidth %"PRId32" is ",w);
+            term_print_to_file(out, terms, substitution[0]);
             fprintf(out, "\n");
           }
-          ivector_push(output, literal);
         }
-        saved_hi = &i->lo;
-        saved_hi_term = i->lo_term;
-        if (interval_is_in(saved_hi,longest)) notdone = false;
+        if (!hole_used && rec_substitution == NULL_TERM) {
+          // If the hole was not used and the recusive call did not output a term,
+          // the intervals of the present bitwith were really useless, we return!
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "The recursive call covered the hole (finding no solution) without our help; we return.\n");
+          }
+          assert(substitution == NULL); // We can't be explaining a propagation
+          ivector_reset(output); // if hole wasn't used, this bitwidth is useless
+          notdone = false;
+          result  = false;
+          saved_hi_term = NULL_TERM;
+        } else { // either the hole was used, or the recursive call returned a solution
+          // otherwise we need to push to output that the hole was small
+          term_t literal;
+          if (hole_used) { // hole was used, must be smaller than...
+            literal =
+              arith_lt_norm(&exp->norm, arith_sub(tm, hi_term, lo_term), smaller_values_term);
+            if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+              FILE* out = ctx_trace_out(ctx);
+              fprintf(out, "The recursive call used the hole; it may have found a solution, generating literal\n");
+              term_print_to_file(out, terms, literal);
+            }
+          } else {
+            // We evaluate solution...
+            uint32_t eval_level = 0;
+            const mcsat_value_t* value = bv_evaluator_evaluate_term(exp->super.eval, substitution[0], &eval_level);
+            assert(value->type == VALUE_BV);
+            bvconstant_sub(&hi, &value->bv_value); // is not 0
+            bvconstant_normalize(&hi);
+            bvconstant_sub_one(&hi); // cannot underflow
+            bvconstant_normalize(&hi);
+            if (!bvconstant_le(&hi,&smaller_values))
+              abort[0] = true;
+            literal =
+              arith_le_norm(&exp->norm, arith_sub(tm, hi_term, substitution[0]), smaller_values_term); 
+            if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+              FILE* out = ctx_trace_out(ctx);
+              fprintf(out, "The recursive call did not use the hole and found a solution, generating literal\n");
+              term_print_to_file(out, terms, literal);
+            }
+          }            
+          if (!abort[0] && arith_is_no_triv(literal)) {
+            if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+              FILE* out = ctx_trace_out(ctx);
+              fprintf(out, "The literal is ");
+              term_print_to_file(out, terms, literal);
+              fprintf(out, "\n");
+            }
+            ivector_push(output, literal);
+          }
+          saved_hi = &i->lo;
+          saved_hi_term = i->lo_term;
+          if (interval_is_in(saved_hi,longest)) notdone = false;
+        }
       }
       ivector_add(output, rec_output.data, rec_output.size);
       delete_ivector(&rec_output);
@@ -1039,49 +1079,51 @@ bool cover(arith_t* exp,
     }
   }
 
-  if (saved_hi_term != NULL_TERM) {
-    if (best_so_far != NULL && first != NULL && interval_is_in(saved_hi,first)) {
-      // We didn't actually need longest, best_so_far plays the role of longest
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "No need for longest interval, as saved_hi is ");
-        bvconst_print(out, saved_hi->data, saved_hi->bitsize);
-        fprintf(out, "\nand first is ");
-        interval_print(out, terms, first);
-        fprintf(out, "\n");
-      }
-      arith_add2conflict(exp, saved_hi_term, first, output);
-      if (first == inherited) { result = true; } // inherited was used
-    } else {
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "Adding to conflict longest interval ");
-        interval_print(out, terms, longest);
-        fprintf(out, "\n");
-      }
-      arith_add2conflict(exp, saved_hi_term, longest, output);
-      if (longest == inherited) { result = true; } // inherited was used
-      // Now treating the delayed recording of first hook, if it exists:
-      if (first == NULL) {
+  if (!abort[0]) {  
+    if (saved_hi_term != NULL_TERM) {
+      if (best_so_far != NULL && first != NULL && interval_is_in(saved_hi,first)) {
+        // We didn't actually need longest, best_so_far plays the role of longest
         if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
           FILE* out = ctx_trace_out(ctx);
-          fprintf(out, "No delayed hook to record, nothing to do here.\n");
-        }
-      } else {
-        if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-          FILE* out = ctx_trace_out(ctx);
-          fprintf(out, "Delayed hook to record\n");
-          interval_print(out, terms, longest);
-          fprintf(out, "\n");
+          fprintf(out, "No need for longest interval, as saved_hi is ");
+          bvconst_print(out, saved_hi->data, saved_hi->bitsize);
+          fprintf(out, "\nand first is ");
           interval_print(out, terms, first);
           fprintf(out, "\n");
         }
-        arith_add2conflict(exp, longest->hi_term, first, output);
+        arith_add2conflict(exp, saved_hi_term, first, output);
         if (first == inherited) { result = true; } // inherited was used
+      } else {
+        if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+          FILE* out = ctx_trace_out(ctx);
+          fprintf(out, "Adding to conflict longest interval ");
+          interval_print(out, terms, longest);
+          fprintf(out, "\n");
+        }
+        arith_add2conflict(exp, saved_hi_term, longest, output);
+        if (longest == inherited) { result = true; } // inherited was used
+        // Now treating the delayed recording of first hook, if it exists:
+        if (first == NULL) {
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "No delayed hook to record, nothing to do here.\n");
+          }
+        } else {
+          if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+            FILE* out = ctx_trace_out(ctx);
+            fprintf(out, "Delayed hook to record\n");
+            interval_print(out, terms, longest);
+            fprintf(out, "\n");
+            interval_print(out, terms, first);
+            fprintf(out, "\n");
+          }
+          arith_add2conflict(exp, longest->hi_term, first, output);
+          if (first == inherited) { result = true; } // inherited was used
+        }
       }
     }
+    ivector_remove_duplicates(output);
   }
-  ivector_remove_duplicates(output);
   return result;
 }
 
@@ -1207,6 +1249,123 @@ void conflict_reduce(arith_t* exp, const ivector_t* reasons_in, ivector_t* reaso
 }
 
 static
+bool intervals_analysis(bv_subexplainer_t* this, interval_t** intervals, uint32_t n) {
+
+  arith_t* exp = (arith_t*) this;
+  plugin_context_t* ctx  = this->ctx;
+  bv_evaluator_t* eval   = this->eval;
+  ivector_t* reasons_out = &exp->reasons;
+  
+  bv_evaluator_clear_cache(eval);
+
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "\nIntervals have been created; we analyse them.\n");
+  }
+
+  assert(n!=0);
+  
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "\nHere they are before they are sorted:\n");
+    for (uint32_t i = 0; i < n; i++) {
+      fprintf(out, "Interval %d is ",i);
+      if (intervals[i] == NULL) {
+        fprintf(out, "EMPTY");
+      } else {
+        interval_print(out, ctx->terms, intervals[i]);
+      }
+      fprintf(out, "\n");
+    }
+    fprintf(out, "And now after we sort them:\n");
+  }
+
+  ptr_array_sort2((void**)intervals, n, NULL, interval_cmp); // We sort the intervals  
+  assert(intervals[0] != NULL); // There should be at least one non-empty interval
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "Interval 0 is now ");
+    interval_print(out, ctx->terms, intervals[0]);
+    fprintf(out, "\n");
+  }
+  uint32_t nonemptys = 1; // Total number of non-empty intervals is about to get computed
+  uint32_t bitwidths = 1; // Total number of distinct bitwidths is about to get computed
+  for (; (nonemptys < n) && (intervals[nonemptys] != NULL); nonemptys++) {
+    if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+      FILE* out = ctx_trace_out(ctx);
+      fprintf(out, "Interval %d is now ",nonemptys);
+      interval_print(out, ctx->terms, intervals[nonemptys]);
+      fprintf(out, "\n");
+    }
+    if (interval_get_bitwidth(intervals[nonemptys-1]) != interval_get_bitwidth(intervals[nonemptys])){
+      bitwidths++;
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+        FILE* out = ctx_trace_out(ctx);
+        fprintf(out, "Found new bitwidth %"PRId32" (old was %"PRId32")\n",interval_get_bitwidth(intervals[nonemptys]),interval_get_bitwidth(intervals[nonemptys-1]));
+      }
+    }
+  }
+
+  // For each of the bitwidths we have, we record
+  // - the pointer to the first interval pointer that has that bitwidth
+  // - how many intervals we have of that bitwidth
+  interval_t** bitwidth_intervals[bitwidths];
+  uint32_t bitwidth_numbers[bitwidths];
+  bitwidth_intervals[0] = intervals;
+  uint32_t j = 0;
+  uint32_t tmp = 1;
+  for (uint32_t i = 1; i < nonemptys; i++) {
+    if (interval_get_bitwidth(intervals[i-1]) != interval_get_bitwidth(intervals[i])) {
+      bitwidth_numbers[j] = tmp; // We have tmp intervals in the jth bitwidth
+      j++; // Going into the next j
+      bitwidth_intervals[j] = &intervals[i];// First interval of the jth bitwidth is this
+      tmp = 0; // Re-initialising counter for the new bitwidth
+    }
+    tmp++;
+  }
+  bitwidth_numbers[j] = tmp; // We have tmp intervals of the smallest bitwidth
+  
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "\nWe now look at the %"PRId32" forbidden intervals we have collected (of %"PRId32" different bitwidths), which are\n",nonemptys,bitwidths);
+    for (uint32_t j = 0; j < bitwidths; j++) { // Looping on different bitwidths
+      fprintf(out, "%"PRId32" intervals of bitwidth %"PRId32":\n",
+              bitwidth_numbers[j], interval_get_bitwidth(bitwidth_intervals[j][0]));
+      for (uint32_t i = 0; i < bitwidth_numbers[j]; i++) {
+        interval_print(out, ctx->terms, bitwidth_intervals[j][i]);
+        fprintf(out, "\n");
+      }
+    }
+    fprintf(out, "\n");
+  }
+
+  /* All atoms in reasons_in have been treated, the resulting forbidden intervals for the
+     var have been collected. It's now time to look at how the cover the domain of feasible values. */
+
+  ivector_t cover_output; // where the call to cover should place literals
+  init_ivector(&cover_output, 0);
+  bool abort = false;
+  assert(exp->substitution == NULL_TERM);
+  cover(exp, &cover_output, bitwidths-1, bitwidth_intervals, bitwidth_numbers, NULL, &exp->substitution, &abort);
+  if (!abort){
+    term_t cvt = exp->norm.csttrail.conflict_var_term;
+    if (exp->substitution != NULL_TERM
+        && bv_term_bitsize(ctx->terms, exp->substitution) != bv_term_bitsize(ctx->terms, cvt))
+      abort = true;
+    else
+      ivector_add(reasons_out, cover_output.data, cover_output.size);
+  } else {
+    if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+      FILE* out = ctx_trace_out(ctx);
+      fprintf(out, "Aborting\n");
+    }
+  }
+  delete_ivector(&cover_output);
+  return !abort;
+}
+
+
+static
 void bvarith_explain(bv_subexplainer_t* this,
                      const ivector_t* reasons_in,
                      variable_t var,
@@ -1243,138 +1402,63 @@ void bvarith_explain(bv_subexplainer_t* this,
     ivector_push(reasons_out, atom_i_value?atom_i_term:not_term(terms, atom_i_term));
   }
 
-  if (!exp->is_inconsistent) {
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith::input")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "Input reasons are:\n");
+    for (uint32_t i = 0; i < reasons_out->size; i++) {
+      fprintf(out,"[%"PRId32"]",i);
+      ctx_trace_term(ctx, reasons_out->data[i]);
+    }
+  }
 
-    if (exp->wild_card != NULL) {
-      term_t substitution = exp->wild_card->hi_term;
-      term_t hi = arith_add_one(tm, exp->wild_card->hi_term);
-      term_t diff = arith_sub(tm,exp->wild_card->lo_term, hi);
-      term_t substitution_reason = arith_eq0(tm, diff);
-      ivector_push(reasons_out, substitution_reason);
-      ivector_add(reasons_out, exp->wild_card->reasons.data, exp->wild_card->reasons.size);
+  if (!exp->is_inconsistent) { // We only do something else if reasons_in doesn't contain false
 
-      substitution_t subst;
-      substitution_construct(&subst, tm, ctx->tracer);
-      substitution_add(&subst, exp->norm.csttrail.conflict_var_term, substitution);
-      term_t substituted;
-      uint32_t eval_level = 0;
-      const mcsat_value_t* value;
-      for (uint32_t i = 0; i < exp->non_singletons.size; i++) {
-        substituted = substitution_run_fwd(&subst, exp->non_singletons.data[i], &exp->norm.csttrail.free_var);
-        value = bv_evaluator_evaluate_term(exp->super.eval, substituted, &eval_level);
-        if (value == &mcsat_value_false) {
-          ivector_push(reasons_out, not_term(terms,substituted));
-          break;
-        }
-      }
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith::ttt")) {
+    // We start by adding all of the accumulated reasons
+    ivector_add(reasons_out, exp->reasons.data, exp->reasons.size); 
+
+    if (exp->substitution != NULL_TERM) { // If we have a substitution, we use it
+
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith::subst")) {
         FILE* out = ctx_trace_out(ctx);
         fprintf(out, "We had found 1 interval leaving a singleton for the conflict variable.\n");
         fprintf(out, "The substitution term is ");
-        ctx_trace_term(ctx, substitution);
-        fprintf(out, "\nThe substituted term that is violated by the model is ");
-        ctx_trace_term(ctx, substituted);
-        fprintf(out, "\nThe substitution reason is ");
-        ctx_trace_term(ctx, substitution_reason);
-        fprintf(out, "\n");
-      }
-      substitution_destruct(&subst);
-    } else {
-  
-      uint32_t n = exp->number_constraints;
-      assert(n!=0);
-      interval_t** intervals = exp->intervals;
-  
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "\nFinished creating the intervals. Here they are before they are sorted:\n");
-        for (uint32_t i = 0; i < n; i++) {
-          fprintf(out, "Interval %d is ",i);
-          if (intervals[i] == NULL) {
-            fprintf(out, "EMPTY");
-          } else {
-            interval_print(out, ctx->terms, intervals[i]);
-          }
-          fprintf(out, "\n");
-        }
-        fprintf(out, "And now after we sort them:\n");
+        ctx_trace_term(ctx, exp->substitution);
       }
 
-      ptr_array_sort2((void**)intervals, n, NULL, interval_cmp); // We sort the intervals  
-      assert(intervals[0] != NULL); // There should be at least one non-empty interval
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "Interval 0 is now ");
-        interval_print(out, ctx->terms, intervals[0]);
-        fprintf(out, "\n");
-      }
-      uint32_t nonemptys = 1; // Total number of non-empty intervals is about to get computed
-      uint32_t bitwidths = 1; // Total number of distinct bitwidths is about to get computed
-      for (; (nonemptys < n) && (intervals[nonemptys] != NULL); nonemptys++) {
-        if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+      if (substitution == NULL) { // We are in conflict mode, let's find the conflict
+        substitution_t subst;
+        substitution_construct(&subst, tm, ctx->tracer);
+        substitution_add(&subst, exp->norm.csttrail.conflict_var_term, exp->substitution);
+        term_t substituted;
+        uint32_t eval_level = 0;
+        const mcsat_value_t* value;
+        for (uint32_t i = 0; i < exp->non_singletons.size; i++) {
+          substituted = substitution_run_fwd(&subst, exp->non_singletons.data[i], &exp->norm.csttrail.free_var);
+          value = bv_evaluator_evaluate_term(exp->super.eval, substituted, &eval_level);
+          if (value == &mcsat_value_false) {
+            ivector_push(reasons_out, not_term(terms,substituted));
+            break;
+          }
+        }
+        if (ctx_trace_enabled(ctx, "mcsat::bv::arith::subst")) {
           FILE* out = ctx_trace_out(ctx);
-          fprintf(out, "Interval %d is now ",nonemptys);
-          interval_print(out, ctx->terms, intervals[nonemptys]);
-          fprintf(out, "\n");
+          fprintf(out, "The substituted term that is violated by the model is ");
+          ctx_trace_term(ctx, substituted);
         }
-        if (interval_get_bitwidth(intervals[nonemptys-1]) != interval_get_bitwidth(intervals[nonemptys])){
-          bitwidths++;
-          if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-            FILE* out = ctx_trace_out(ctx);
-            fprintf(out, "Found new bitwidth %"PRId32" (old was %"PRId32")\n",interval_get_bitwidth(intervals[nonemptys]),interval_get_bitwidth(intervals[nonemptys-1]));
-          }
-        }
+        substitution_destruct(&subst);
+      } else { // We are in propagation mode, we return the substitution term
+        substitution[0] = exp->substitution;
       }
-
-      // For each of the bitwidths we have, we record
-      // - the pointer to the first interval pointer that has that bitwidth
-      // - how many intervals we have of that bitwidth
-      interval_t** bitwidth_intervals[bitwidths];
-      uint32_t bitwidth_numbers[bitwidths];
-      bitwidth_intervals[0] = intervals;
-      uint32_t j = 0;
-      uint32_t tmp = 1;
-      for (uint32_t i = 1; i < nonemptys; i++) {
-        if (interval_get_bitwidth(intervals[i-1]) != interval_get_bitwidth(intervals[i])) {
-          bitwidth_numbers[j] = tmp; // We have tmp intervals in the jth bitwidth
-          j++; // Going into the next j
-          bitwidth_intervals[j] = &intervals[i];// First interval of the jth bitwidth is this
-          tmp = 0; // Re-initialising counter for the new bitwidth
-        }
-        tmp++;
-      }
-      bitwidth_numbers[j] = tmp; // We have tmp intervals of the smallest bitwidth
-  
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "\nWe now look at the %"PRId32" forbidden intervals we have collected (of %"PRId32" different bitwidths), which are\n",nonemptys,bitwidths);
-        for (uint32_t j = 0; j < bitwidths; j++) { // Looping on different bitwidths
-          fprintf(out, "%"PRId32" intervals of bitwidth %"PRId32":\n",
-                  bitwidth_numbers[j], interval_get_bitwidth(bitwidth_intervals[j][0]));
-          for (uint32_t i = 0; i < bitwidth_numbers[j]; i++) {
-            interval_print(out, ctx->terms, bitwidth_intervals[j][i]);
-            fprintf(out, "\n");
-          }
-        }
-        fprintf(out, "\n");
-      }
-
-      /* All atoms in reasons_in have been treated, the resulting forbidden intervals for the
-         var have been collected. It's now time to look at how the cover the domain of feasible values. */
-
-      ivector_t cover_output; // where the call to cover should place literals
-      init_ivector(&cover_output, 0);
-      cover(exp, &cover_output, bitwidths-1, bitwidth_intervals, bitwidth_numbers, NULL, substitution);
-      ivector_add(reasons_out, cover_output.data, cover_output.size);
-      delete_ivector(&cover_output);
+    } else { // We have no substitution, we should not be in propagation mode
+      assert(substitution == NULL);
     }
+  } else { // We have an inconsistency, we should not be in propagation mode
+    assert(substitution == NULL);
   }
-  
-  free_intervals(exp);
 
-  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith::returned")) {
     FILE* out = ctx_trace_out(ctx);
-    fprintf(out, "Returned reasons are:\n");
+    fprintf(out, "Returned reasons (%"PRId32") are:\n", reasons_out->size);
     for (uint32_t i = 0; i < reasons_out->size; i++) {
       fprintf(out,"[%"PRId32"]",i);
       ctx_trace_term(ctx, reasons_out->data[i]);
@@ -1409,8 +1493,9 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
   reset_arith_norm(&exp->norm);
   ptr_hmap_reset(&exp->coeff_cache);
   ivector_reset(&exp->non_singletons);
-  exp->is_inconsistent     = false;
-  exp->wild_card           = NULL;
+  ivector_reset(&exp->reasons);
+  exp->is_inconsistent = false;
+  exp->substitution    = NULL_TERM;
   
   if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
     FILE* out = ctx_trace_out(ctx);
@@ -1434,15 +1519,13 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
     }
   }
   
-  bool all_good  = true;  // whether all the (simplified) constraints so far are in the fragment
-  bool wild_card = false; // whether the conflict can definitely be handled,
-  // regardless of the constraints that aren't yet scanned; this happens if 
-  // one of the constraints scanned so far either (a) is the constant false or (b) is understood
-  // by the explainer to leave exactly 1 feasible value for the conflict variable
+  interval_t* wild_card = NULL; // whether the conflict can definitely be handled,
+  // regardless of the constraints that aren't yet scanned,
+  // because one of the constraints scanned so far turns into an interval
+  // that leaves exactly 1 feasible value for the conflict variable
+  // wild_card is that interval.
 
-  exp->number_constraints = simplified.size;
-  exp->intervals = safe_malloc((simplified.size)*sizeof(interval_t*));
-  interval_t** intervals = exp->intervals; // abbreviation
+  interval_t* intervals[simplified.size];
 
   // We go through the simplified conflict
   // variables that will change with every iteration of the constraint scan
@@ -1469,19 +1552,21 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
     }
 
     if (atom_term == true_term) { // Constraint is the constant true or false
-      if (!atom_value) { // Constraint is the constant false, this is a wild card of type (a)
-        wild_card = true;
-        exp->is_inconsistent = true; // recording that it is of type (a)
-      }
+      if (!atom_value) // Constraint is the constant false
+        exp->is_inconsistent = true;
       intervals[i] = NULL; // No interval to record
       continue; // Go to next constraint
     }
 
     // Constraint is not a Boolean constant
-    if (wild_card) { // If a wild card has already been found
+    if (exp->is_inconsistent) { // If the conflict already contains false
       intervals[i] = NULL; // ...no need to analyse the present constraint
-      if (!exp->is_inconsistent) // but we record it unless the wild_card is of type (a)
-        ivector_push(&exp->non_singletons, simplified.data[i]);
+      continue; // Go to next constraint
+    }
+
+    if (wild_card != NULL) { // If a wild card has already been found
+      intervals[i] = NULL; // ...no need to analyse the present constraint
+      ivector_push(&exp->non_singletons, simplified.data[i]); // but we record the constraint
       continue; // Go to next constraint
     }
     
@@ -1604,7 +1689,7 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
       constraint_good = false;
     }
     }
-    
+
     if (constraint_good) { // then we turn it into an interval
       term_t t0prime = NULL_TERM;
       term_t t1prime = NULL_TERM;
@@ -1640,6 +1725,7 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
       }
       t0prime = arith_normalise(&exp->norm, t0prime);
       t1prime = arith_normalise(&exp->norm, t1prime);
+      // We can finally generate the corresponding interval
       intervals[i] = bv_arith_unit_le(exp, t1prime, t0prime, atom_value);
 
       if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
@@ -1648,38 +1734,65 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
       }
       if (intervals[i] != NULL){
         transform_interval(exp, &intervals[i]);
-        if (      intervals[i] != NULL
-               && (!wild_card)
-               && (!is_propagation)
-               && (interval_get_bitwidth(intervals[i])
-                   == bv_term_bitsize(terms, csttrail->conflict_var_term))) {
+        // Now, if it is a non-empty interval for the whole conflict variable...
+        // it may be a wild card
+        if ( intervals[i] != NULL
+             && (!is_propagation)
+             && (interval_get_bitwidth(intervals[i])
+                 == bv_term_bitsize(terms, csttrail->conflict_var_term))) {
           bvconstant_t length;
           init_bvconstant(&length);
           bvconstant_copy(&length, intervals[i]->length.bitsize, intervals[i]->length.data);
           bvconstant_add_one(&length);
           bvconstant_normalize(&length);
           if (bvconstant_is_minus_one(&length)) { // Non-forbidden values are a singleton
-            wild_card = true;
-            exp->wild_card = intervals[i];
-          } else {
+            wild_card = intervals[i];
+          } else { // Not a wild card, we record the constraint
             ivector_push(&exp->non_singletons, simplified.data[i]);
           }
           delete_bvconstant(&length);
-        } else {
+        } else { // Not a wild card, we record the constraint
           ivector_push(&exp->non_singletons, simplified.data[i]);
         }
       }
-    } else {
-      intervals[i] = NULL;
-      all_good = false;
-      ivector_push(&exp->non_singletons, simplified.data[i]);
+    } else { // We can't understand this constraint
+      intervals[i] = NULL; // Our only chance is to find a wild card or an inconsistency
+      ivector_push(&exp->non_singletons, simplified.data[i]); // we record the constraint
     }
   }
 
   delete_ivector(&simplified);
 
-  bool result = all_good || wild_card;
-  if (!result) free_intervals(exp);
+  bool result;
+
+  if (exp->is_inconsistent) {
+    result = true;
+  } else { // Conflict does not contain false, but it may contain a wild card
+    if (wild_card != NULL) { // In cas it does...
+      exp->substitution = wild_card->hi_term;
+      term_t hi = arith_add_one(tm, wild_card->hi_term);
+      term_t diff = arith_sub  (tm, wild_card->lo_term, hi);
+      term_t substitution_reason = arith_eq0(tm, diff);
+
+      ivector_t* reasons_out = &exp->reasons;
+      ivector_push(reasons_out, substitution_reason);
+      ivector_add(reasons_out, wild_card->reasons.data, wild_card->reasons.size);
+      result = true;
+    } else { // No wild card, we have no choice but to analyse the intervals
+      result = intervals[0]==NULL ?
+        false :
+        intervals_analysis(this, intervals, simplified.size);
+    }
+  }
+  // We're done with the intervals, we free them
+  for (uint32_t i = 0; i < simplified.size; i++) {
+    if (intervals[i] != NULL)
+      interval_destruct(intervals[i]);
+  }
+  if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+    FILE* out = ctx_trace_out(ctx);
+    fprintf(out, "Declaring we %s explain\n", result?"can":"can't");
+  }
   return result;
 }
 
@@ -1709,6 +1822,7 @@ void destruct(bv_subexplainer_t* this) {
   delete_arith_norm(&exp->norm);
   delete_ptr_hmap(&exp->coeff_cache);
   delete_ivector(&exp->non_singletons);
+  delete_ivector(&exp->reasons);
 }
 
 /** Allocate the sub-explainer and setup the methods */
@@ -1728,6 +1842,7 @@ bv_subexplainer_t* arith_new(plugin_context_t* ctx, watch_list_manager_t* wlm, b
   init_arith_norm(&exp->norm);
   init_ptr_hmap(&exp->coeff_cache, 0);
   init_ivector(&exp->non_singletons, 0);
+  init_ivector(&exp->reasons, 0);
 
   return (bv_subexplainer_t*) exp;
 }
