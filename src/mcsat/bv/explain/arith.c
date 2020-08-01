@@ -40,9 +40,8 @@
 
 
 /**
-   Extracting coefficients from terms.
+   Data structures
 **/
-
 
 // Data resulting from the analysis (as performed by bv_arith_coeff) of a bv polynomial where only one monomial is unevaluable
 
@@ -52,9 +51,7 @@ typedef struct polypair_s {
   term_t polyrest; // Rest of the polynomial, so that original term is coeff*var + polyrest; can be 0, but is never NULL_TERM unless t was a bad term
 } polypair_t;
 
-/**
-   Subexplainer type
-**/
+/* Subexplainer type */
 
 // In what follows, there's a notion of normalisation via which
 // t<w> propagates the lower bit extraction down to variables if t is not evaluable
@@ -98,6 +95,22 @@ static inline void freeval(arith_t* exp) {
     safe_free((polypair_t*) current->val);
   }
 }
+
+
+/**
+   Creating an interval from a conflict literal.
+
+   First, bv_arith_coeff extracts from a term the non-evaluable part (with its coefficient) 
+   and the evaluable part.
+
+   Second, bv_arith_init_side evaluates the evaluable part.
+
+   Third, bv_arith_unit_le takes (lhs <= rhs), calls the above two functions,
+   and produces an interval of forbidden values for the non-evaluable part.
+
+   Finally, transform_interval turns that interval into an interval of forbidden
+   values for a lower-bits extract from the conflict variable.
+**/
 
 // Function returns the polypair_t (variable, coefficient, polyrest) of (normalised) u
 // if u is not a good term for the fragment:
@@ -360,12 +373,6 @@ polypair_t* bv_arith_coeff(arith_t* exp, term_t u, bool assume_fragment) {
 }
 
 
-
-
-/**
-   Explanation mechanism. First for 1 constraint. Then for the whole conflict
-**/
-
 // Analyses one side of an atom, assumed to be in the fragment.
 // polyrest is the polyrest of the side, cc is a non-initialised bv_constant that is the evaluation of polyrest
 void bv_arith_init_side(arith_t* exp, term_t polyrest, bvconstant_t* cc) {
@@ -401,7 +408,6 @@ void bv_arith_init_side(arith_t* exp, term_t polyrest, bvconstant_t* cc) {
   }
 
 }
-
 
 // Treat a constraint of the form lhs <= rhs
 interval_t* bv_arith_unit_le(arith_t* exp, term_t lhs, term_t rhs, bool b) {
@@ -581,6 +587,87 @@ interval_t* bv_arith_unit_le(arith_t* exp, term_t lhs, term_t rhs, bool b) {
   return result;
 }
 
+void transform_interval(arith_t* exp, interval_t** interval) {
+
+  plugin_context_t* ctx = exp->super.ctx;
+  term_manager_t* tm    = ctx->tm;
+  term_table_t* terms   = ctx->terms;
+
+  if (!interval_is_full(interval[0])) {
+  
+    uint32_t w = term_bitsize(terms, interval[0]->var);
+
+    if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+      FILE* out = ctx_trace_out(ctx);
+      fprintf(out, "Transforming non-full interval ");
+      interval_print(out, ctx->terms, interval[0]);
+      fprintf(out, "\nNow analysing the shape of the interval's variable (of bitsize %"PRId32")\n",w);
+    }
+
+    // We analyse the shape of the variable whose value is forbidden to be in interval[0]
+    arith_analyse_t* ts = arith_analyse(&exp->norm,interval[0]->var);
+    assert(arith_is_zero(terms, ts->garbage));    // Otherwise it wouldn't be in the fragment
+    assert(ts->length != 0); // Otherwise the term is evaluable
+    assert(arith_is_zero(terms, ts->eval)); // The variable should only have zeros as evaluable bits
+    assert(ts->base != NULL_TERM); // There should be a base
+    assert(ts->base == exp->norm.csttrail.conflict_var_term // Either it's the conflict variable
+           || term_bitsize(terms,ts->base) == ts->start + ts->length);
+    // or the top pruning has been pushed further inside the base
+
+    bool is_empty = interval_uptrim(&exp->super, &exp->norm, ts->suffix+ts->length, interval[0]);
+    (void) is_empty; // Otherwise compilation warning
+    assert(!is_empty);
+    is_empty = interval_downtrim(&exp->super, &exp->norm, ts->suffix, interval[0]);
+    assert(!is_empty);
+    interval_downextend(&exp->super, ts->start, interval[0]);
+
+    switch (term_kind(terms, ts->base)) {
+    case BV_POLY:
+    case BV64_POLY: {
+      polypair_t* p = bv_arith_coeff(exp, ts->base, true);
+      assert(p != NULL);
+      assert(term_kind(terms, p->var) != BV_POLY
+             && term_kind(terms, p->var) != BV64_POLY );
+      assert(p->coeff == 1 || p->coeff == -1);
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+        FILE* out = ctx_trace_out(ctx);
+        fprintf(out, "Base is ");
+        ctx_trace_term(ctx, ts->base);
+        fprintf(out, "Coeff is %"PRId32", while polyrest is ", (p->coeff == 1) ? 1 : -1);
+        ctx_trace_term(ctx, p->polyrest);
+      }
+      interval_subtract(&exp->super,p->polyrest,interval[0]);
+      if (p->coeff == -1)
+        interval_negate(&exp->super,interval[0]);
+      interval[0]->var = p->var;
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+        FILE* out = ctx_trace_out(ctx);
+        fprintf(out, "New variable is ");
+        ctx_trace_term(ctx, interval[0]->var);
+      }
+      transform_interval(exp, interval);
+      break;
+    }
+    default: {
+      assert(ts->base == exp->norm.csttrail.conflict_var_term);
+      interval[0]->var = term_extract(tm, ts->base, 0, ts->start + ts->length);
+      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
+        FILE* out = ctx_trace_out(ctx);
+        fprintf(out, "New variable is ");
+        term_print_to_file(out, tm->terms, interval[0]->var);
+        fprintf(out, "\n");
+      }
+    }
+    }
+  }
+}
+
+
+/**
+   Analysis of the set of intervals produced from the conflict literals
+**/
+
+
 // Adds interval to conflict
 void arith_add2conflict(arith_t* exp,
                            term_t min_saved_term,
@@ -678,13 +765,12 @@ bool cover(arith_t* exp,
            interval_t*** intervals, // Array of size bitwidths
            uint32_t* numbers,       // Array of size bitwidths
            interval_t* inherited,   // First interval of coverage, can be NULL
-           term_t* substitution,    // Secondary output: term used for substitution of the variable
+           term_t* substitution,    // Secondary output: term used for substitution of the variable, can be NULL
            bool* abort              // Tertiary output: whether to abort
            ){
   assert(intervals[0] != NULL);
   assert(intervals[0][0] != NULL);
   assert(!abort[0]);
-  assert(substitution != NULL);
   assert(abort != NULL);
   assert(!abort[0]);
   
@@ -866,8 +952,9 @@ bool cover(arith_t* exp,
 
       // First situation: there are no smaller bitwidths
       if (bitwidths == 0) {
-        // We'd better not have already found a substitution!
-        if (substitution[0] != NULL_TERM) {
+        // We'd better be authorising a substitution
+        // and not have already found one!
+        if (substitution == NULL || substitution[0] != NULL_TERM) {
           abort[0] = true;
           break;
         }
@@ -969,10 +1056,11 @@ bool cover(arith_t* exp,
           interval_print(out, terms, &hole_complement);
           fprintf(out, "\n");
         }
+        term_t* rec_propa = (substitution == NULL) ? NULL : &rec_substitution;
         hole_used = cover(exp, &rec_output,
                           bitwidths-1, &intervals[1], &numbers[1],
                           &hole_complement,
-                          &rec_substitution,
+                          rec_propa,
                           abort);
         interval_delete(&hole_complement);
         delete_bvconstant(&lo_proj);
@@ -985,11 +1073,9 @@ bool cover(arith_t* exp,
           fprintf(out, "\nHole is at least as big as the domain of the next bitwidth, we recursively call cover on that whole domain.\n");
         }
         cover(exp, &rec_output, bitwidths-1, &intervals[1], &numbers[1], NULL,
-              &rec_substitution,
+              NULL,
               abort);
         hole_used = false;
-        /* if (rec_substitution != NULL_TERM) */
-        /*   abort[0] = true; */
       }
 
 
@@ -1127,127 +1213,6 @@ bool cover(arith_t* exp,
   return result;
 }
 
-void transform_interval(arith_t* exp, interval_t** interval) {
-
-  plugin_context_t* ctx = exp->super.ctx;
-  term_manager_t* tm    = ctx->tm;
-  term_table_t* terms   = ctx->terms;
-
-  if (!interval_is_full(interval[0])) {
-  
-    uint32_t w = term_bitsize(terms, interval[0]->var);
-
-    if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-      FILE* out = ctx_trace_out(ctx);
-      fprintf(out, "Transforming non-full interval ");
-      interval_print(out, ctx->terms, interval[0]);
-      fprintf(out, "\nNow analysing the shape of the interval's variable (of bitsize %"PRId32")\n",w);
-    }
-
-    // We analyse the shape of the variable whose value is forbidden to be in interval[0]
-    arith_analyse_t* ts = arith_analyse(&exp->norm,interval[0]->var);
-    assert(arith_is_zero(terms, ts->garbage));    // Otherwise it wouldn't be in the fragment
-    assert(ts->length != 0); // Otherwise the term is evaluable
-    assert(arith_is_zero(terms, ts->eval)); // The variable should only have zeros as evaluable bits
-    assert(ts->base != NULL_TERM); // There should be a base
-    assert(ts->base == exp->norm.csttrail.conflict_var_term // Either it's the conflict variable
-           || term_bitsize(terms,ts->base) == ts->start + ts->length);
-    // or the top pruning has been pushed further inside the base
-
-    bool is_empty = interval_uptrim(&exp->super, &exp->norm, ts->suffix+ts->length, interval[0]);
-    (void) is_empty; // Otherwise compilation warning
-    assert(!is_empty);
-    is_empty = interval_downtrim(&exp->super, &exp->norm, ts->suffix, interval[0]);
-    assert(!is_empty);
-    interval_downextend(&exp->super, ts->start, interval[0]);
-
-    switch (term_kind(terms, ts->base)) {
-    case BV_POLY:
-    case BV64_POLY: {
-      polypair_t* p = bv_arith_coeff(exp, ts->base, true);
-      assert(p != NULL);
-      assert(term_kind(terms, p->var) != BV_POLY
-             && term_kind(terms, p->var) != BV64_POLY );
-      assert(p->coeff == 1 || p->coeff == -1);
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "Base is ");
-        ctx_trace_term(ctx, ts->base);
-        fprintf(out, "Coeff is %"PRId32", while polyrest is ", (p->coeff == 1) ? 1 : -1);
-        ctx_trace_term(ctx, p->polyrest);
-      }
-      interval_subtract(&exp->super,p->polyrest,interval[0]);
-      if (p->coeff == -1)
-        interval_negate(&exp->super,interval[0]);
-      interval[0]->var = p->var;
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "New variable is ");
-        ctx_trace_term(ctx, interval[0]->var);
-      }
-      transform_interval(exp, interval);
-      break;
-    }
-    default: {
-      assert(ts->base == exp->norm.csttrail.conflict_var_term);
-      interval[0]->var = term_extract(tm, ts->base, 0, ts->start + ts->length);
-      if (ctx_trace_enabled(ctx, "mcsat::bv::arith")) {
-        FILE* out = ctx_trace_out(ctx);
-        fprintf(out, "New variable is ");
-        term_print_to_file(out, tm->terms, interval[0]->var);
-        fprintf(out, "\n");
-      }
-    }
-    }
-  }
-}
-
-// The following function normalises a conflict
-static
-void add_constraint(plugin_context_t* ctx, term_t t, bool v, ivector_t* reasons_out) {
-  assert(is_boolean_term(ctx->terms, t));
-  term_t constraint = v ? t : not_term(ctx->terms,t);
-  ivector_push(reasons_out, constraint);
-}
-
-// The following function normalises a conflict
-static
-void conflict_reduce(arith_t* exp, const ivector_t* reasons_in, ivector_t* reasons_out) {
-
-  bv_csttrail_t* csttrail = &exp->norm.csttrail;
-  plugin_context_t* ctx   = csttrail->ctx;
-  term_table_t* terms     = ctx->terms;
-
-  (void) terms;
-  
-  // Standard abbreviations
-  const mcsat_trail_t* trail = ctx->trail;
-
-  uint32_t n = reasons_in->size;
-  assert(n!=0);
-
-  // Variables that are going to be re-used for every item in reasons_in
-  variable_t atom_i_var;
-  bool       atom_i_value;
-  term_t     atom_i_term;
-
-  // We go through reasons_in
-  for (uint32_t i = 0; i < n; i++) {
-    atom_i_var   = reasons_in->data[i];
-    atom_i_value = trail_get_boolean_value(trail, atom_i_var);
-    atom_i_term  = variable_db_get_term(ctx->var_db, atom_i_var);
-
-    assert(good_term(terms,atom_i_term) && is_pos_term(atom_i_term));
-    assert(is_boolean_term(terms, atom_i_term));
-
-    // We first scan the atom (collecting free variables and co.)
-    bv_evaluator_csttrail_scan(csttrail, atom_i_var);
-
-    add_constraint(ctx, atom_i_term, atom_i_value, reasons_out);
-  }
-
-}
-
 static
 bool intervals_analysis(bv_subexplainer_t* this, interval_t** intervals, uint32_t n) {
 
@@ -1339,16 +1304,23 @@ bool intervals_analysis(bv_subexplainer_t* this, interval_t** intervals, uint32_
     fprintf(out, "\n");
   }
 
+  assert(exp->substitution == NULL_TERM);
+
   /* All atoms in reasons_in have been treated, the resulting forbidden intervals for the
      var have been collected. It's now time to look at how the cover the domain of feasible values. */
 
-  ivector_t cover_output; // where the call to cover should place literals
+  // Whether or not to authorize propagation terms
+  // (first interval's bitwidth is that of conflict variable)
+  term_t cvt = exp->norm.csttrail.conflict_var_term;
+  bool propa = interval_get_bitwidth(intervals[0]) == bv_term_bitsize(ctx->terms, cvt);
+  // where the call to cover should place substitution, if authorised
+  term_t* substitution = propa ? &exp->substitution : NULL;
+  // where the call to cover should place output literals
+  ivector_t cover_output;
   init_ivector(&cover_output, 0);
   bool abort = false;
-  assert(exp->substitution == NULL_TERM);
-  cover(exp, &cover_output, bitwidths-1, bitwidth_intervals, bitwidth_numbers, NULL, &exp->substitution, &abort);
+  cover(exp, &cover_output, bitwidths-1, bitwidth_intervals, bitwidth_numbers, NULL, substitution, &abort);
   if (!abort){
-    term_t cvt = exp->norm.csttrail.conflict_var_term;
     if (exp->substitution != NULL_TERM
         && bv_term_bitsize(ctx->terms, exp->substitution) != bv_term_bitsize(ctx->terms, cvt))
       abort = true;
@@ -1364,13 +1336,16 @@ bool intervals_analysis(bv_subexplainer_t* this, interval_t** intervals, uint32_
   return !abort;
 }
 
+/**
+   Explaining a conflict or propagation
+**/
 
 static
-void bvarith_explain(bv_subexplainer_t* this,
-                     const ivector_t* reasons_in,
-                     variable_t var,
-                     ivector_t* reasons_out,
-                     term_t* substitution) {
+void explain(bv_subexplainer_t* this,
+             const ivector_t* reasons_in,
+             variable_t var,
+             ivector_t* reasons_out,
+             term_t* substitution) {
 
   arith_t* exp = (arith_t*) this;
   plugin_context_t* ctx = this->ctx;
@@ -1468,12 +1443,66 @@ void bvarith_explain(bv_subexplainer_t* this,
 
 static
 void explain_conflict(bv_subexplainer_t* this, const ivector_t* conflict_core, variable_t conflict_var, ivector_t* conflict) {
-  bvarith_explain(this, conflict_core, conflict_var, conflict, NULL);
+  explain(this, conflict_core, conflict_var, conflict, NULL);
 }
 
+static
+term_t explain_propagation(bv_subexplainer_t* this, const ivector_t* reasons_in, variable_t x, ivector_t* reasons_out) {
+  term_t result = NULL_TERM ;
+  explain(this, reasons_in, x, reasons_out, &result);
+  return result;
+}
+
+
+
 /**
-   Detection of whether a conflict or propagation is within the fragment, and external API
+   Detection of whether a conflict or propagation is within the fragment
 **/
+
+static
+void add_constraint(plugin_context_t* ctx, term_t t, bool v, ivector_t* reasons_out) {
+  assert(is_boolean_term(ctx->terms, t));
+  term_t constraint = v ? t : not_term(ctx->terms,t);
+  ivector_push(reasons_out, constraint);
+}
+
+// The following function normalises a conflict (so far it doesn't simplify anything)
+static
+void conflict_reduce(arith_t* exp, const ivector_t* reasons_in, ivector_t* reasons_out) {
+
+  bv_csttrail_t* csttrail = &exp->norm.csttrail;
+  plugin_context_t* ctx   = csttrail->ctx;
+  term_table_t* terms     = ctx->terms;
+
+  (void) terms;
+  
+  // Standard abbreviations
+  const mcsat_trail_t* trail = ctx->trail;
+
+  uint32_t n = reasons_in->size;
+  assert(n!=0);
+
+  // Variables that are going to be re-used for every item in reasons_in
+  variable_t atom_i_var;
+  bool       atom_i_value;
+  term_t     atom_i_term;
+
+  // We go through reasons_in
+  for (uint32_t i = 0; i < n; i++) {
+    atom_i_var   = reasons_in->data[i];
+    atom_i_value = trail_get_boolean_value(trail, atom_i_var);
+    atom_i_term  = variable_db_get_term(ctx->var_db, atom_i_var);
+
+    assert(good_term(terms,atom_i_term) && is_pos_term(atom_i_term));
+    assert(is_boolean_term(terms, atom_i_term));
+
+    // We first scan the atom (collecting free variables and co.)
+    bv_evaluator_csttrail_scan(csttrail, atom_i_var);
+
+    add_constraint(ctx, atom_i_term, atom_i_value, reasons_out);
+  }
+
+}
 
 static
 bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variable_t conflict_var, bool is_propagation) {
@@ -1806,12 +1835,9 @@ bool can_explain_propagation(bv_subexplainer_t* this, const ivector_t* reasons, 
   return can_explain(this, reasons, x, true);
 }
 
-static
-term_t explain_propagation(bv_subexplainer_t* this, const ivector_t* reasons_in, variable_t x, ivector_t* reasons_out) {
-  term_t result = NULL_TERM ;
-  bvarith_explain(this, reasons_in, x, reasons_out, &result);
-  return result;
-}
+/**
+   External API
+**/
 
 static
 void destruct(bv_subexplainer_t* this) {
