@@ -1669,7 +1669,9 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
         constraint_good = false;
         break; // exit the switch
       }
-      if ( t0_coeff * t1_coeff == -1 ) {
+      if ( (kind != EQ_TERM)
+           && (kind != BV_EQ_ATOM)
+           && (t0_coeff * t1_coeff == -1) ) {
         // Turns out we actually can't deal with the constraint. We stop
         if (ctx_trace_enabled(ctx, "mcsat::bv::arith::fail")) {
           FILE* out = ctx_trace_out(ctx);

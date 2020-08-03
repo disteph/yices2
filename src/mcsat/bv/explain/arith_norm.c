@@ -866,7 +866,7 @@ term_t arith_normalise_upto(arith_norm_t* norm, term_t u, uint32_t w){
 
   default: {
     assert(false);
-    return NULL_TERM;
+    return NULL_TERM; // Just to prevent compiler complaining
   }
   }
 }
