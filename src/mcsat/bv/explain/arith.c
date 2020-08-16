@@ -1601,8 +1601,8 @@ bool can_explain(bv_subexplainer_t* this, const ivector_t* conflict_core, variab
     
     // Constraint is not a Boolean constant and no wild card has yet been found: we analyse it
     term_kind_t kind = term_kind(terms, atom_term);
-    term_t t0;
-    term_t t1;
+    term_t t0 = NULL_TERM;
+    term_t t1 = NULL_TERM;
     bool constraint_good = true;
 
     switch (kind) {
